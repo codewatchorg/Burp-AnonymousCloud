@@ -1,6 +1,6 @@
 /*
  * Name:           Burp Indicators of Vulnerability
- * Version:        0.1.0
+ * Version:        0.1.1
  * Date:           1/17/2019
  * Author:         Josh Berry - josh.berry@codewatch.org
  * Github:         https://github.com/codewatchorg/Burp-AnonymousCloud
@@ -16,6 +16,8 @@ package burp;
 import java.util.List;
 import java.util.ArrayList;
 import java.util.Random;
+import java.io.InputStreamReader;
+import java.io.BufferedReader;
 import java.io.PrintWriter;
 import java.net.URL;
 import java.util.regex.Matcher;
@@ -41,23 +43,35 @@ import com.amazonaws.services.s3.model.AccessControlList;
 import com.amazonaws.services.s3.model.GroupGrantee;
 import com.amazonaws.services.s3.model.Permission;
 import com.amazonaws.regions.Regions;
+import org.apache.http.HttpResponse;
+import org.apache.http.client.HttpClient;
+import org.apache.http.Header;
+import org.apache.http.message.BasicHeader;
+import org.apache.http.client.methods.HttpGet;
+import org.apache.http.client.methods.HttpPost;
+import org.apache.http.impl.client.HttpClientBuilder;
+import org.apache.http.entity.StringEntity;
 import java.util.Iterator;
+import org.json.JSONObject;
+import org.json.JSONArray;
 
 public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
 
   // Setup extension wide variables
   public IBurpExtenderCallbacks extCallbacks;
   public IExtensionHelpers extHelpers;
-  private static final String burpAnonCloudVersion = "0.1.0";
+  private static final String burpAnonCloudVersion = "0.1.1";
   private static final Pattern S3BucketPattern = Pattern.compile("((?:\\w+://)?(?:([\\w.-]+)\\.s3[\\w.-]*\\.amazonaws\\.com|s3(?:[\\w.-]*\\.amazonaws\\.com(?:(?::\\d+)?\\\\?/)*|://)([\\w.-]+))(?:(?::\\d+)?\\\\?/)?(?:.*?\\?.*Expires=(\\d+))?)", Pattern.CASE_INSENSITIVE);
-  private static final Pattern GoogleBucketPattern = Pattern.compile("((?:\\w+://)?(?:([\\w.-]+)\\.storage[\\w-]*\\.googleapis\\.com|(?:(?:console\\.cloud\\.google\\.com/storage/browser/|storage[\\w-]*\\.googleapis\\.com)(?:(?::\\d+)?\\\\?/)*|gs://)([\\w.-]+))(?:(?::\\d+)?\\\\?/([^\\s?#]*))?(?:.*\\?.*Expires=(\\d+))?)", Pattern.CASE_INSENSITIVE);
+  private static final Pattern GoogleBucketPattern = Pattern.compile("((?:\\w+://)?(?:([\\w.-]+)\\.storage[\\w-]*\\.googleapis\\.com|(?:(?:console\\.cloud\\.google\\.com/storage/browser/|storage[\\w-]*\\.googleapis\\.com)(?:(?::\\d+)?\\\\?/)*|gs://)([\\w.-]+))(?:(?::\\d+)?\\\\?/([^\\s?'\"#]*))?(?:.*\\?.*Expires=(\\d+))?)", Pattern.CASE_INSENSITIVE);
   private static final Pattern AzureBucketPattern = Pattern.compile("(([\\w.-]+\\.blob\\.core\\.windows\\.net(?::\\d+)?\\\\?/[\\w.-]+)(?:.*?\\?.*se=([\\w%-]+))?)", Pattern.CASE_INSENSITIVE);
-  private static final Pattern AwsRegionPattern = Pattern.compile("x-amz-bucket-region:");
   public JPanel anonCloudPanel;
   private String awsAccessKey = "";
   private String awsSecretAccessKey = "";
-  private String BucketName = "";
-  private Boolean isAuthSet = false;
+  private String googleBearerToken = "";
+  private static final String GoogleValidationUrl = "https://storage.googleapis.com/storage/v1/b/";
+  private static final String GoogleBucketUploadUrl = "https://storage.googleapis.com/upload/storage/v1/b/";
+  private Boolean isAwsAuthSet = false;
+  private Boolean isGoogleAuthSet = false;
   AWSCredentials anonCredentials = new AnonymousAWSCredentials();
   AWSCredentials authCredentials;
   AmazonS3 anonS3client = AmazonS3ClientBuilder
@@ -84,35 +98,47 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
     JLabel anonCloudAwsKeyDescLabel = new JLabel();
     JLabel anonCloudAwsSecretKeyLabel = new JLabel();
     JLabel anonCloudAwsSecretKeyDescLabel = new JLabel();
+    JLabel anonCloudGoogleBearerLabel = new JLabel();
+    JLabel anonCloudGoogleBearerDescLabel = new JLabel();
     final JTextField anonCloudAwsKeyText = new JTextField();
     final JTextField anonCloudAwsSecretKeyText = new JTextField();
+    final JTextField anonCloudGoogleBearerText = new JTextField();
     JButton anonCloudSetHeaderBtn = new JButton("Set Configuration");
     JLabel anonCloudSetHeaderDescLabel = new JLabel();
     
     // Set values for labels, panels, locations, for AWS stuff
     // AWS Access Key GUI
     anonCloudAwsKeyLabel.setText("AWS Access Key:");
-    anonCloudAwsKeyDescLabel.setText("Any AWS authenticate user test: AWS Access Key.");
+    anonCloudAwsKeyDescLabel.setText("Any AWS authenticated user test: AWS Access Key.");
     anonCloudAwsKeyLabel.setBounds(16, 15, 125, 20);
     anonCloudAwsKeyText.setBounds(146, 12, 310, 26);
     anonCloudAwsKeyDescLabel.setBounds(606, 15, 600, 20);
     
     // AWS Secret Access Key GUI
     anonCloudAwsSecretKeyLabel.setText("AWS Secret Access Key:");
-    anonCloudAwsSecretKeyDescLabel.setText("Any AWS authenticate user test: AWS Secret Access Key.");
+    anonCloudAwsSecretKeyDescLabel.setText("Any AWS authenticated user test: AWS Secret Access Key.");
     anonCloudAwsSecretKeyLabel.setBounds(16, 50, 125, 20);
     anonCloudAwsSecretKeyText.setBounds(146, 47, 310, 26);
     anonCloudAwsSecretKeyDescLabel.setBounds(606, 50, 600, 20);
     
+    // Set values for labels, panels, locations, for Google stuff
+    // Google Bearer Token
+    anonCloudGoogleBearerLabel.setText("Google Bearer Token:");
+    anonCloudGoogleBearerDescLabel.setText("Any Google authenticated user test: Google Bearer Token (use 'glcoud auth print-access-token')");
+    anonCloudGoogleBearerLabel.setBounds(16, 85, 125, 20);
+    anonCloudGoogleBearerText.setBounds(146, 82, 310, 26);
+    anonCloudGoogleBearerDescLabel.setBounds(606, 85, 600, 20);
+    
     // Create button for setting options
     anonCloudSetHeaderDescLabel.setText("Enable access configuration.");
-    anonCloudSetHeaderDescLabel.setBounds(606, 85, 600, 20);
-    anonCloudSetHeaderBtn.setBounds(146, 82, 310, 26);
+    anonCloudSetHeaderDescLabel.setBounds(606, 120, 600, 20);
+    anonCloudSetHeaderBtn.setBounds(146, 120, 310, 26);
     
     anonCloudSetHeaderBtn.addActionListener(new ActionListener() {
       public void actionPerformed(ActionEvent e) {
         awsAccessKey = anonCloudAwsKeyText.getText();
         awsSecretAccessKey = anonCloudAwsSecretKeyText.getText();
+        googleBearerToken = anonCloudGoogleBearerText.getText();
         
         // If valid AWS keys were entered, setup a client
         if (awsAccessKey.matches("^(AIza[0-9A-Za-z-_]{35}|A3T[A-Z0-9]|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|AGPA[A-Z0-9]{16}|AIDA[A-Z0-9]{16}|AROA[A-Z0-9]{16}|AIPA[A-Z0-9]{16}|ANPA[A-Z0-9]{16}|ANVA[A-Z0-9]{16})") && awsSecretAccessKey.length() == 40) {
@@ -126,7 +152,11 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
             .withCredentials(new AWSStaticCredentialsProvider(authCredentials))
             .build();
           
-          isAuthSet = true;
+          isAwsAuthSet = true;
+        }
+        
+        if (googleBearerToken.matches("^ya29\\.[0-9A-Za-z\\-_]+")) {
+          isGoogleAuthSet = true;
         }
       }
     });
@@ -138,6 +168,9 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
     anonCloudPanel.add(anonCloudAwsSecretKeyLabel);
     anonCloudPanel.add(anonCloudAwsSecretKeyDescLabel);
     anonCloudPanel.add(anonCloudAwsSecretKeyText);
+    anonCloudPanel.add(anonCloudGoogleBearerLabel);
+    anonCloudPanel.add(anonCloudGoogleBearerDescLabel);
+    anonCloudPanel.add(anonCloudGoogleBearerText);
     anonCloudPanel.add(anonCloudSetHeaderBtn);
     anonCloudPanel.add(anonCloudSetHeaderDescLabel);
     
@@ -166,13 +199,12 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
   // Perform a passive check for cloud buckets
   @Override
   public List<IScanIssue> doPassiveScan(IHttpRequestResponse messageInfo) {
+
     // Only process requests if the URL is in scope
     if (extCallbacks.isInScope(extHelpers.analyzeRequest(messageInfo).getUrl())) {
-    
       // Setup default response body variables
       String respRaw = new String(messageInfo.getResponse());
       String respBody = respRaw.substring(extHelpers.analyzeResponse(messageInfo.getResponse()).getBodyOffset());
-      List<IScanIssue> issues = new ArrayList<>(1);
       
       // Create patter matchers for each type
       Matcher S3BucketMatch = S3BucketPattern.matcher(respBody);
@@ -182,7 +214,7 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
       // Create an issue noting an AWS S3 Bucket was identified in the response
       if (S3BucketMatch.find()) {
         List<int[]> S3BucketMatches = getMatches(messageInfo.getResponse(), S3BucketMatch.group(0).getBytes());
-        issues.add(new CustomScanIssue(
+        IScanIssue awsIdIssue = new CustomScanIssue(
           messageInfo.getHttpService(),
           extHelpers.analyzeRequest(messageInfo).getUrl(), 
           new IHttpRequestResponse[] { extCallbacks.applyMarkers(messageInfo, null, S3BucketMatches) },
@@ -190,64 +222,131 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
           "The response body contained the following bucket: " + S3BucketMatch.group(0),
           "Information",
           "Firm"
-        ));
+        );
         
-        getBucketName(S3BucketMatch.group(0));
+        // Add the S3 bucket identification issue
+        extCallbacks.addScanIssue(awsIdIssue);
         
-        if (validateBucket("anonymous")) {
+        // Get the actual name of the bucket
+        String BucketName = getBucketName("AWS", S3BucketMatch.group(0));
+        
+        // Perform anonymous checks
+        if (validateBucket("AWS", "anonymous", BucketName)) {
+          
+          // Create a finding noting that the bucket is valid
+          IScanIssue awsConfirmIssue = new CustomScanIssue(
+            messageInfo.getHttpService(),
+            extHelpers.analyzeRequest(messageInfo).getUrl(), 
+            new IHttpRequestResponse[] { extCallbacks.applyMarkers(messageInfo, null, S3BucketMatches) },
+            "[Anonymous Cloud] AWS S3 Bucket Exists",
+            "The following bucket was confirmed to be valid: " + BucketName,
+            "Low",
+            "Certain"
+          );
+          
+          // Add confirmed bucket issue
+          extCallbacks.addScanIssue(awsConfirmIssue);
+          
           // Check for public read bucket anonymous access
           try {
-            publicReadCheck("AWS", messageInfo, S3BucketMatches);
+            publicReadCheck("AWS", messageInfo, S3BucketMatches, BucketName);
           } catch (Exception ignore) {}
           
           // Check for public write bucket anonymous access
           try {
-            publicWriteCheck("AWS", messageInfo, S3BucketMatches);
+            publicWriteCheck("AWS", messageInfo, S3BucketMatches, BucketName);
           } catch (Exception ignore) {}
         }
         
-        if (validateBucket("anyuser")) {
+        // Perform checks from the perspecitve of any authenticated AWS user
+        if (validateBucket("AWS", "anyuser", BucketName)) {
           // Check for any authenticated AWS user read bucket access
           try {
-            anyAuthReadCheck("AWS", messageInfo, S3BucketMatches);
+            anyAuthReadCheck("AWS", messageInfo, S3BucketMatches, BucketName);
           } catch (Exception ignore) {}
           
           // Check for any authenticated AWS user write bucket access
           try {
-            anyAuthWriteCheck("AWS", messageInfo, S3BucketMatches);
+            anyAuthWriteCheck("AWS", messageInfo, S3BucketMatches, BucketName);
           } catch (Exception ignore) {}
         }
-        
-        // Create the base issue
-        return issues;
       }
         
       // Create an issue noting a Google Bucket was identified in the response
       if (GoogleBucketMatch.find()) {
         List<int[]> GoogleBucketMatches = getMatches(messageInfo.getResponse(), GoogleBucketMatch.group(0).getBytes());
-        issues.add(new CustomScanIssue(
+        IScanIssue googleIdIssue = new CustomScanIssue(
           messageInfo.getHttpService(),
           extHelpers.analyzeRequest(messageInfo).getUrl(), 
           new IHttpRequestResponse[] { extCallbacks.applyMarkers(messageInfo, null, GoogleBucketMatches) },
-          "[Anonymous Cloud] Google Storage Bucket Identified",
+          "[Anonymous Cloud] Google Storage Container Identified",
           "The response body contained the following bucket: " + GoogleBucketMatch.group(0),
           "Information",
           "Firm"
-        ));
+        );
         
-        // Check for public read/write anonymous access
-        try {
-          publicReadCheck("Google", messageInfo, GoogleBucketMatches);
-        } catch (Exception ignore) {}
+        // Add the Google bucket identification issue
+        extCallbacks.addScanIssue(googleIdIssue);
         
-        // Create the base issue
-        return issues;
+        // Get the actual name of the bucket
+        String BucketName = getBucketName("Google", GoogleBucketMatch.group(0));
+        
+        // Perform anonymous checks for Google
+        if (validateBucket("Google", "anonymous", BucketName)) {
+          
+          // Create a finding noting that the bucket is valid
+          IScanIssue googleConfirmIssue = new CustomScanIssue(
+            messageInfo.getHttpService(),
+            extHelpers.analyzeRequest(messageInfo).getUrl(), 
+            new IHttpRequestResponse[] { extCallbacks.applyMarkers(messageInfo, null, GoogleBucketMatches) },
+            "[Anonymous Cloud] Google Storage Container Exists",
+            "The following bucket was confirmed to be valid: " + BucketName,
+            "Low",
+            "Certain"
+          );
+          
+          // Add confirmed bucket issue
+          extCallbacks.addScanIssue(googleConfirmIssue);
+        
+          // Check for public read anonymous access
+          try {
+            publicReadCheck("Google", messageInfo, GoogleBucketMatches, BucketName);
+          } catch (Exception ignore) {}
+          
+          // Check for publc read ACL access
+          try {
+            publicReadAclCheck("Google", messageInfo, GoogleBucketMatches, BucketName);
+          } catch (Exception ignore) {}
+          
+          // Check for publc write anonymous access
+          try {
+            publicWriteCheck("Google", messageInfo, GoogleBucketMatches, BucketName);
+          } catch (Exception ignore) { }
+        }
+        
+        // Perform checks from the perspecitve of any authenticated Google user
+        if (validateBucket("Google", "anyuser", BucketName)) {
+          // Check for any authenticated Google user read bucket access
+          try {
+            anyAuthReadCheck("Google", messageInfo, GoogleBucketMatches, BucketName);
+          } catch (Exception ignore) {}
+          
+          // Check for any authenticated Google user read bucket ACL access
+          try {
+            anyAuthReadAclCheck("Google", messageInfo, GoogleBucketMatches, BucketName);
+          } catch (Exception ignore) {}
+          
+          // Check for any authenticated Google user write bucket access
+          try {
+            anyAuthWriteCheck("Google", messageInfo, GoogleBucketMatches, BucketName);
+          } catch (Exception ignore) {}
+        }
       }
 
       // Create an issue noting an Azure Bucket was identified in the response
       if (AzureBucketMatch.find()) {
         List<int[]> AzureBucketMatches = getMatches(messageInfo.getResponse(), AzureBucketMatch.group(0).getBytes());
-        issues.add(new CustomScanIssue(
+        IScanIssue azureIdIssue = new CustomScanIssue(
           messageInfo.getHttpService(),
           extHelpers.analyzeRequest(messageInfo).getUrl(), 
           new IHttpRequestResponse[] { extCallbacks.applyMarkers(messageInfo, null, AzureBucketMatches) },
@@ -255,15 +354,18 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
           "The response body contained the following bucket: " + AzureBucketMatch.group(0),
           "Information",
           "Firm"
-        ));
+        );
+        
+        // Add the Azure bucket identification issue
+        extCallbacks.addScanIssue(azureIdIssue);
+        
+        // Get the actual name of the bucket
+        String BucketName = getBucketName("Azure", AzureBucketMatch.group(0));
         
         // Check for public read/write anonymous access
         try {
-          publicReadCheck("Azure", messageInfo, AzureBucketMatches);
+          publicReadCheck("Azure", messageInfo, AzureBucketMatches, BucketName);
         } catch (Exception ignore) {}
-        
-        // Create the base issue
-        return issues;
       }
     }
     
@@ -277,9 +379,11 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
   }
   
   // Grab bucket name from matched bucket URL
-  public void getBucketName(String BucketUrl) {
-      String BucketName = "";
+  public String getBucketName(String BucketType, String BucketUrl) {
+    String BucketName = "";
 
+    // Get buckets based on type
+    if (BucketType.equals("AWS")) {
       // Get the actual bucket name either in the form of bucketname.s3.amazonaws.com or s3.amazonaws.com/bucketname
       if (BucketUrl.startsWith("http://s3.amazonaws") || BucketUrl.startsWith("https://s3.amazonaws")) {
         String[] Bucket = BucketUrl.split("/");
@@ -291,22 +395,89 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
         BucketName = BucketUrl.split("/")[BucketLen-1];
         BucketName = BucketName.replaceAll("\\.s3.*\\.amazonaws\\.com", "");
       }
-    this.BucketName = BucketName;
+    } else if (BucketType.equals("Azure")) {
+    } else if (BucketType.equals("Google")) {
+      // Get the actual bucket name in the form of bucket.storage.googleapis.com, storage.googleapis.com/storage/v1/b/bucket, or console.cloud.google.com/storage/browser/bucket
+      if (BucketUrl.startsWith("http://storage.googleapis.com") || BucketUrl.startsWith("https://storage.googleapis.com")) {
+        String BucketPart = BucketUrl.replaceAll("(http|https)://storage.googleapis.com/storage/v1/b/", "");
+        BucketName = BucketPart.split("/")[0];
+      } else if (BucketUrl.startsWith("http://console.cloud.google.com") || BucketUrl.startsWith("https://console.cloud.google.com")) {
+        String BucketPart = BucketUrl.replaceAll("(http|https)://console.cloud.google.com/storage/browser/", "");
+        BucketName = BucketPart.split("/")[0];
+      } else {
+        BucketName = BucketUrl.split("\\.")[0].replaceAll("(http|https)://", "");
+      }
+    }
+    return BucketName;
   }
   
   // Validate a bucket exists
-  public Boolean validateBucket(String authType) {
-      
-    // Call s3client to validate bucket
-    if (authType.equals("anonymous")) {
-      if (this.anonS3client.doesBucketExistV2(BucketName)) {
-        return true;
+  public Boolean validateBucket(String bucketType, String authType, String BucketName) {
+    
+   // Get buckets based on type
+    if (bucketType.equals("AWS")) { 
+      // Call s3client to validate bucket
+      if (authType.equals("anonymous")) {
+        if (this.anonS3client.doesBucketExistV2(BucketName)) {
+          return true;
+        } else {
+          return false;
+        }
+      } else if (authType.equals("anyuser") && isAwsAuthSet) {
+        if (this.authS3client.doesBucketExistV2(BucketName)) {
+          return true;
+        } else {
+          return false;
+        }
       } else {
         return false;
       }
-    } else if (authType.equals("anyuser") && isAuthSet) {
-      if (this.authS3client.doesBucketExistV2(BucketName)) {
-        return true;
+    } else if (bucketType.equals("Azure")) {
+      return false;
+    } else if (bucketType.equals("Google")) {
+      if (authType.equals("anonymous")) {
+        // Create a client to check Google for the bucket
+        HttpClient client = HttpClientBuilder.create().build();
+        HttpGet req = new HttpGet(GoogleValidationUrl + BucketName);
+        HttpResponse resp;
+        Boolean bucketExists = false;
+      
+        // Connect to GCP services
+        try {
+          resp = client.execute(req);
+          String headers = resp.getStatusLine().toString();
+        
+          // If the status is 200, it is public, of 401 then private, otherwise doesn't exist
+          if (headers.contains("200 OK") || headers.contains("401 Unauthorized")) {
+            bucketExists = true;
+          } else {
+            bucketExists = false;
+          }
+        } catch (Exception ignore) {}
+      
+        return bucketExists;
+      } else if (authType.equals("anyuser") && isGoogleAuthSet) {
+          
+        // Create a client to check Google for the bucket
+        HttpClient client = HttpClientBuilder.create().build();
+        HttpGet req = new HttpGet(GoogleValidationUrl + BucketName);
+        HttpResponse resp;
+        Boolean bucketExists = false;
+      
+        // Connect to GCP services
+        try {
+          resp = client.execute(req);
+          String headers = resp.getStatusLine().toString();
+        
+          // If the status is 200, it is public, of 401 then private, otherwise doesn't exist
+          if (headers.contains("200 OK") || headers.contains("401 Unauthorized")) {
+            bucketExists = true;
+          } else {
+            bucketExists = false;
+          }
+        } catch (Exception ignore) {}
+      
+        return bucketExists;
       } else {
         return false;
       }
@@ -332,7 +503,7 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
   }
   
   // Perform anonymous public read access check
-  private void publicReadCheck(String BucketType, IHttpRequestResponse messageInfo, List<int[]>matches) {
+  private void publicReadCheck(String BucketType, IHttpRequestResponse messageInfo, List<int[]>matches, String BucketName) {
     
     // AWS specific checks
     if (BucketType.equals("AWS")) {
@@ -416,11 +587,157 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
           extCallbacks.addScanIssue(publicReadAclIssue);
         }
       } catch (Exception ignore) {} 
+    
+    // Google specific checks
+    } else if (BucketType.equals("Google")) {
+        
+      // Create a client to check Google for the bucket
+      HttpClient bucketClient = HttpClientBuilder.create().build();
+      HttpGet reqBucket = new HttpGet(GoogleValidationUrl + BucketName + "/o");
+      
+      // Connect to GCP services for bucket access
+      try {
+        HttpResponse resp = bucketClient.execute(reqBucket);
+        String headers = resp.getStatusLine().toString();
+
+        // If the status is 200, it is public, of 401 then private, otherwise doesn't exist
+        if (headers.contains("200 OK")) {
+          
+          // Read the response and get the JSON
+          BufferedReader rd = new BufferedReader(new InputStreamReader(resp.getEntity().getContent()));
+          String jsonStr = "";
+          String line = "";
+          while ((line = rd.readLine()) != null) {
+            jsonStr = jsonStr + line;
+          }
+
+          // Read JSON results from public bucket
+          JSONObject json = new JSONObject(jsonStr);
+          JSONArray bucketObjs = json.getJSONArray("items");
+          
+          // Setup basic variables for enumerating and building string of objects
+          int firstBucket = 0;
+          int bucketCounter = 1;
+          int totalBuckets = bucketObjs.length();
+          String ObjList = "";
+        
+          // Loop through our list ot build a string of all objects
+          for (int i = 0; i < bucketObjs.length(); i++) {
+            String obj = bucketObjs.getJSONObject(i).getString("name");
+
+            if (firstBucket == 0 && totalBuckets >= 1) {
+              ObjList = obj;
+              firstBucket = 1;
+            } else if (totalBuckets == 2 && firstBucket == 1) {
+              ObjList = ObjList + " and " + obj;
+            } else if (firstBucket == 1 && bucketCounter == totalBuckets) {
+              ObjList = ObjList + ", and " + obj;
+            } else {
+              ObjList = ObjList + ", " + obj;
+            }
+          
+            bucketCounter++;
+          }
+          
+          // Create public read access issue with the list of objects included
+          IScanIssue publicReadIssue = new CustomScanIssue(
+            messageInfo.getHttpService(),
+            extHelpers.analyzeRequest(messageInfo).getUrl(),
+            new IHttpRequestResponse[] { extCallbacks.applyMarkers(messageInfo, null, matches) },
+            "[Anonymous Cloud] Publicly Accessible Google Storage Container",
+            "The following bucket contents were enumerated from " + BucketName + ": " + ObjList + ".",
+            "Medium",
+            "Certain"
+          );
+
+          // Add public read access issue
+          extCallbacks.addScanIssue(publicReadIssue);
+        }
+      } catch (Exception ignore) {}
+    }
+  }
+  
+  // Perform anonymous public read ACL access check
+  private void publicReadAclCheck(String BucketType, IHttpRequestResponse messageInfo, List<int[]>matches, String BucketName) {
+    
+    // Google specific checks
+    if (BucketType.equals("Google")) {
+      
+      // Create a client to check Google for the bucket
+      HttpClient iamClient = HttpClientBuilder.create().build();
+      HttpGet reqIam = new HttpGet(GoogleValidationUrl + BucketName + "/iam");
+      
+      // Connect to GCP services for bucket ACL access
+      try {
+        HttpResponse resp = iamClient.execute(reqIam);
+        String headers = resp.getStatusLine().toString();
+
+        // If the status is 200, it is public, of 401 then private, otherwise doesn't exist
+        if (headers.contains("200 OK")) {
+          
+          // Read the response and get the JSON
+          BufferedReader rd = new BufferedReader(new InputStreamReader(resp.getEntity().getContent()));
+          String jsonStr = "";
+          String line = "";
+          while ((line = rd.readLine()) != null) {
+            jsonStr = jsonStr + line;
+          }
+
+          // Read JSON results from public bucket
+          JSONObject json = new JSONObject(jsonStr);
+          JSONArray bucketObjs = json.getJSONArray("bindings");
+          
+          // Setup basic variables for enumerating and building string of objects
+          int firstBucket = 0;
+          int bucketCounter = 1;
+          int totalBuckets = bucketObjs.length();
+          String ObjRoleList = "";
+        
+          // Loop through our list ot build a string of all objects
+          for (int i = 0; i < bucketObjs.length(); i++) {
+            String objRole = bucketObjs.getJSONObject(i).getString("role");
+            JSONArray memberObjs = bucketObjs.getJSONObject(i).getJSONArray("members");
+            String objMembers = "";
+            
+            // Loop through ACL members
+            for (int j = 0; j < memberObjs.length(); j++) {
+              objMembers = objMembers + memberObjs.getString(j) + "; ";
+            }
+
+            if (firstBucket == 0 && totalBuckets >= 1) {
+              ObjRoleList = "Role: " + objRole + " | Members: " + objMembers;
+              firstBucket = 1;
+            } else if (totalBuckets == 2 && firstBucket == 1) {
+              ObjRoleList = ObjRoleList + " and Role: " + objRole + " | Members: " + objMembers;
+            } else if (firstBucket == 1 && bucketCounter == totalBuckets) {
+              ObjRoleList = ObjRoleList + ", and Role: " + objRole + " | Members: " + objMembers;
+            } else {
+              ObjRoleList = ObjRoleList + ", Role: " + objRole + " | Members: " + objMembers;
+            }
+          
+            bucketCounter++;
+          }
+          
+          // Create public read access issue with the list of objects included
+          IScanIssue publicReadAclIssue = new CustomScanIssue(
+            messageInfo.getHttpService(),
+            extHelpers.analyzeRequest(messageInfo).getUrl(),
+            new IHttpRequestResponse[] { extCallbacks.applyMarkers(messageInfo, null, matches) },
+            "[Anonymous Cloud] Publicly Accessible Google Storage Container ACL",
+            "The following bucket contents were enumerated from " + BucketName + ": " + ObjRoleList + ".",
+            "Medium",
+            "Certain"
+          );
+
+          // Add public read access issue
+          extCallbacks.addScanIssue(publicReadAclIssue);
+        }
+      } catch (Exception ignore) {}
     }
   }
   
   // Perform anonymous public write access check
-  private void publicWriteCheck(String BucketType, IHttpRequestResponse messageInfo, List<int[]>matches) {
+  private void publicWriteCheck(String BucketType, IHttpRequestResponse messageInfo, List<int[]>matches, String BucketName) {
     
     // AWS specific checks
     if (BucketType.equals("AWS")) {
@@ -452,7 +769,7 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
             messageInfo.getHttpService(),
             extHelpers.analyzeRequest(messageInfo).getUrl(),
             new IHttpRequestResponse[] { extCallbacks.applyMarkers(messageInfo, null, matches) },
-            "[Anonymous Cloud] Publicly Writeable AWS S3 Bucket",
+            "[Anonymous Cloud] Publicly Writable AWS S3 Bucket",
             "The following bucket object was created in " + BucketName + ": " + bucketItem + ".",
             "High",
             "Certain"
@@ -482,7 +799,7 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
                 messageInfo.getHttpService(),
                 extHelpers.analyzeRequest(messageInfo).getUrl(),
                 new IHttpRequestResponse[] { extCallbacks.applyMarkers(messageInfo, null, matches) },
-                "[Anonymous Cloud] Publicly Writeable AWS S3 ACL",
+                "[Anonymous Cloud] Publicly Writable AWS S3 ACL",
                 "Full permission was given to the " + bucketItem + " in the " + BucketName + " bucket for any authenticated AWS user.",
                 "High",
                 "Certain"
@@ -495,11 +812,50 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
         }
           
       } catch (Exception ignore) {}
+      
+    // Google specific checks
+    } else if (BucketType.equals("Google")) {
+      
+      // Create a client to check Google for the bucket
+      String bucketItem = "Burp-AnonymousCloud-" + genRandStr() + ".txt";
+      HttpClient client = HttpClientBuilder.create().build();
+      HttpPost req = new HttpPost(GoogleBucketUploadUrl + BucketName + "/o?uploadType=media&name=" + bucketItem);
+      String bucketContent = "Burp-AnonymousCloud Extension Public Write Test!";
+
+      // Create and set headers for posting content
+      Header headers[] = {
+	new BasicHeader("Content-Type", "text/html")
+      }; 
+      req.setHeaders(headers);
+      
+      // Connect to GCP services for bucket ACL access
+      try {
+        req.setEntity(new StringEntity(bucketContent));
+        HttpResponse resp = client.execute(req);
+        String respHeaders = resp.getStatusLine().toString();
+
+        // If the status is 200, it is public, of 401 then private, otherwise doesn't exist
+        if (respHeaders.contains("200 OK")) {
+          // Create public write access issue with object written
+          IScanIssue publicWriteIssue = new CustomScanIssue(
+            messageInfo.getHttpService(),
+            extHelpers.analyzeRequest(messageInfo).getUrl(),
+            new IHttpRequestResponse[] { extCallbacks.applyMarkers(messageInfo, null, matches) },
+            "[Anonymous Cloud] Publicly Writable Google Storage Container",
+            "The following bucket object was created in " + BucketName + ": " + bucketItem + ".",
+            "High",
+            "Certain"
+          );
+          
+          // Add public write bucket access issue
+          extCallbacks.addScanIssue(publicWriteIssue);
+        }
+      } catch (Exception ignore) { }
     }
   }
   
   // Perform check for allowing any authenticated user read access
-  private void anyAuthReadCheck(String BucketType, IHttpRequestResponse messageInfo, List<int[]>matches) {
+  private void anyAuthReadCheck(String BucketType, IHttpRequestResponse messageInfo, List<int[]>matches, String BucketName) {
     
     // AWS specific checks
     if (BucketType.equals("AWS")) {
@@ -555,7 +911,7 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
         "[Anonymous Cloud] Any Authenticated AWS User Accessible AWS S3 Bucket",
         "The following bucket contents were enumerated from " + BucketName + ": " + ObjList + ".",
         "Medium",
-       "Certain"
+        "Certain"
       );
         
       // Add any authenticated AWS user read access issue
@@ -581,11 +937,168 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
         // Add public read ACL access issue
         extCallbacks.addScanIssue(anyAuthReadAclIssue);
       }
+    } else if (BucketType.equals("Google")) {
+        
+      // Create a client to check Google for the bucket
+      HttpClient bucketClient = HttpClientBuilder.create().build();
+      HttpGet reqBucket = new HttpGet(GoogleValidationUrl + BucketName + "/o");
+      
+      // Create and set headers for posting content
+      Header headers[] = {
+	new BasicHeader("Authorization", "Bearer " + googleBearerToken)
+      }; 
+      reqBucket.setHeaders(headers);
+      
+      // Connect to GCP services for bucket access
+      try {
+        HttpResponse resp = bucketClient.execute(reqBucket);
+        String respHeaders = resp.getStatusLine().toString();
+
+        // If the status is 200, it is public, of 401 then private, otherwise doesn't exist
+        if (respHeaders.contains("200 OK")) {
+          
+          // Read the response and get the JSON
+          BufferedReader rd = new BufferedReader(new InputStreamReader(resp.getEntity().getContent()));
+          String jsonStr = "";
+          String line = "";
+          while ((line = rd.readLine()) != null) {
+            jsonStr = jsonStr + line;
+          }
+
+          // Read JSON results from public bucket
+          JSONObject json = new JSONObject(jsonStr);
+          JSONArray bucketObjs = json.getJSONArray("items");
+          
+          // Setup basic variables for enumerating and building string of objects
+          int firstBucket = 0;
+          int bucketCounter = 1;
+          int totalBuckets = bucketObjs.length();
+          String ObjList = "";
+        
+          // Loop through our list ot build a string of all objects
+          for (int i = 0; i < bucketObjs.length(); i++) {
+            String obj = bucketObjs.getJSONObject(i).getString("name");
+
+            if (firstBucket == 0 && totalBuckets >= 1) {
+              ObjList = obj;
+              firstBucket = 1;
+            } else if (totalBuckets == 2 && firstBucket == 1) {
+              ObjList = ObjList + " and " + obj;
+            } else if (firstBucket == 1 && bucketCounter == totalBuckets) {
+              ObjList = ObjList + ", and " + obj;
+            } else {
+              ObjList = ObjList + ", " + obj;
+            }
+          
+            bucketCounter++;
+          }
+          
+          // Create public read access issue with the list of objects included
+          IScanIssue publicReadIssue = new CustomScanIssue(
+            messageInfo.getHttpService(),
+            extHelpers.analyzeRequest(messageInfo).getUrl(),
+            new IHttpRequestResponse[] { extCallbacks.applyMarkers(messageInfo, null, matches) },
+            "[Anonymous Cloud] Any Authenticated Google User Accessible Google Storage Container",
+            "The following bucket contents were enumerated from " + BucketName + ": " + ObjList + ".",
+            "Medium",
+            "Certain"
+          );
+
+          // Add public read access issue
+          extCallbacks.addScanIssue(publicReadIssue);
+        }
+      } catch (Exception ignore) {}
+    }
+  }
+  
+  // Perform anonymous public read ACL access check
+  private void anyAuthReadAclCheck(String BucketType, IHttpRequestResponse messageInfo, List<int[]>matches, String BucketName) {
+    
+    // Google specific checks
+    if (BucketType.equals("Google")) {
+      
+      // Create a client to check Google for the bucket
+      HttpClient iamClient = HttpClientBuilder.create().build();
+      HttpGet reqIam = new HttpGet(GoogleValidationUrl + BucketName + "/iam");
+      
+      // Create and set headers for posting content
+      Header headers[] = {
+	new BasicHeader("Authorization", "Bearer " + googleBearerToken)
+      }; 
+      reqIam.setHeaders(headers);
+      
+      
+      // Connect to GCP services for bucket ACL access
+      try {
+        HttpResponse resp = iamClient.execute(reqIam);
+        String respHeaders = resp.getStatusLine().toString();
+
+        // If the status is 200, it is public, of 401 then private, otherwise doesn't exist
+        if (respHeaders.contains("200 OK")) {
+          
+          // Read the response and get the JSON
+          BufferedReader rd = new BufferedReader(new InputStreamReader(resp.getEntity().getContent()));
+          String jsonStr = "";
+          String line = "";
+          while ((line = rd.readLine()) != null) {
+            jsonStr = jsonStr + line;
+          }
+
+          // Read JSON results from public bucket
+          JSONObject json = new JSONObject(jsonStr);
+          JSONArray bucketObjs = json.getJSONArray("bindings");
+          
+          // Setup basic variables for enumerating and building string of objects
+          int firstBucket = 0;
+          int bucketCounter = 1;
+          int totalBuckets = bucketObjs.length();
+          String ObjRoleList = "";
+        
+          // Loop through our list ot build a string of all objects
+          for (int i = 0; i < bucketObjs.length(); i++) {
+            String objRole = bucketObjs.getJSONObject(i).getString("role");
+            JSONArray memberObjs = bucketObjs.getJSONObject(i).getJSONArray("members");
+            String objMembers = "";
+            
+            // Loop through ACL members
+            for (int j = 0; j < memberObjs.length(); j++) {
+              objMembers = objMembers + memberObjs.getString(j) + "; ";
+            }
+
+            if (firstBucket == 0 && totalBuckets >= 1) {
+              ObjRoleList = "Role: " + objRole + " | Members: " + objMembers;
+              firstBucket = 1;
+            } else if (totalBuckets == 2 && firstBucket == 1) {
+              ObjRoleList = ObjRoleList + " and Role: " + objRole + " | Members: " + objMembers;
+            } else if (firstBucket == 1 && bucketCounter == totalBuckets) {
+              ObjRoleList = ObjRoleList + ", and Role: " + objRole + " | Members: " + objMembers;
+            } else {
+              ObjRoleList = ObjRoleList + ", Role: " + objRole + " | Members: " + objMembers;
+            }
+          
+            bucketCounter++;
+          }
+          
+          // Create public read access issue with the list of objects included
+          IScanIssue publicReadAclIssue = new CustomScanIssue(
+            messageInfo.getHttpService(),
+            extHelpers.analyzeRequest(messageInfo).getUrl(),
+            new IHttpRequestResponse[] { extCallbacks.applyMarkers(messageInfo, null, matches) },
+            "[Anonymous Cloud] Any Authenticated Google User Accessible Google Storage Container ACL",
+            "The following bucket contents were enumerated from " + BucketName + ": " + ObjRoleList + ".",
+            "Medium",
+            "Certain"
+          );
+
+          // Add public read access issue
+          extCallbacks.addScanIssue(publicReadAclIssue);
+        }
+      } catch (Exception ignore) {}
     }
   }
 
   // Perform check for allowing any authenticated user write access
-  private void anyAuthWriteCheck(String BucketType, IHttpRequestResponse messageInfo, List<int[]>matches) {
+  private void anyAuthWriteCheck(String BucketType, IHttpRequestResponse messageInfo, List<int[]>matches, String BucketName) {
     
     // AWS specific checks
     if (BucketType.equals("AWS")) {
@@ -617,7 +1130,7 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
             messageInfo.getHttpService(),
             extHelpers.analyzeRequest(messageInfo).getUrl(),
             new IHttpRequestResponse[] { extCallbacks.applyMarkers(messageInfo, null, matches) },
-            "[Anonymous Cloud] Any Authenticated AWS User Writeable AWS S3 Bucket",
+            "[Anonymous Cloud] Any Authenticated AWS User Writable AWS S3 Bucket",
             "The following bucket object was created in " + BucketName + ": " + bucketItem + ".",
             "High",
             "Certain"
@@ -647,7 +1160,7 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
                 messageInfo.getHttpService(),
                 extHelpers.analyzeRequest(messageInfo).getUrl(),
                 new IHttpRequestResponse[] { extCallbacks.applyMarkers(messageInfo, null, matches) },
-                "[Anonymous Cloud] Any Authenticated AWS User Writeable AWS S3 ACL",
+                "[Anonymous Cloud] Any Authenticated AWS User Writable AWS S3 ACL",
                 "Full permission was given to the " + bucketItem + " in the " + BucketName + " bucket for any authenticated AWS user.",
                 "High",
                 "Certain"
@@ -660,6 +1173,43 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
         }
           
       } catch (Exception ignore) {}
+    } else if (BucketType.equals("Google")) {
+      // Create a client to check Google for the bucket
+      String bucketItem = "Burp-AnonymousCloud-" + genRandStr() + ".txt";
+      HttpClient client = HttpClientBuilder.create().build();
+      HttpPost req = new HttpPost(GoogleBucketUploadUrl + BucketName + "/o?uploadType=media&name=" + bucketItem);
+      String bucketContent = "Burp-AnonymousCloud Extension Public Write Test!";
+
+      // Create and set headers for posting content
+      Header headers[] = {
+	new BasicHeader("Authorization", "Bearer " + googleBearerToken),
+        new BasicHeader("Content-Type", "text/html")
+      }; 
+      req.setHeaders(headers);
+      
+      // Connect to GCP services for bucket ACL access
+      try {
+        req.setEntity(new StringEntity(bucketContent));
+        HttpResponse resp = client.execute(req);
+        String respHeaders = resp.getStatusLine().toString();
+
+        // If the status is 200, it is public, of 401 then private, otherwise doesn't exist
+        if (respHeaders.contains("200 OK")) {
+          // Create public write access issue with object written
+          IScanIssue publicWriteIssue = new CustomScanIssue(
+            messageInfo.getHttpService(),
+            extHelpers.analyzeRequest(messageInfo).getUrl(),
+            new IHttpRequestResponse[] { extCallbacks.applyMarkers(messageInfo, null, matches) },
+            "[Anonymous Cloud] Any Authenticated Google User Writable Google Storage Container",
+            "The following bucket object was created in " + BucketName + ": " + bucketItem + ".",
+            "High",
+            "Certain"
+          );
+          
+          // Add public write bucket access issue
+          extCallbacks.addScanIssue(publicWriteIssue);
+        }
+      } catch (Exception ignore) { }
     }
   }
   
