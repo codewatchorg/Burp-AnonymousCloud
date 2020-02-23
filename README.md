@@ -15,6 +15,7 @@ The extension checks the following things as an anonymous user:
 6. Publicly accessible ACLs on Google Storage containers which will be enumerated by the extension.
 7. Publicly writable Google Storage containers, to which a sample file will be written.
 8. Publicly accessible Azure Storage containers which will be enumerated by the extension.
+9. Publicly accessible Firebase DBs and anonymous read/write access.
 
 The extension checks the following things in AWS/Google as an authenticated AWS/Google user (though not a defined user for the bucket itself):
 1. Any authenticated AWS user accessible S3 buckets which will be enumerated by the extension.

@@ -1,6 +1,6 @@
 /*
  * Name:           Burp Anonymous Cloud
- * Version:        0.1.3
+ * Version:        0.1.4
  * Date:           1/21/2019
  * Author:         Josh Berry - josh.berry@codewatch.org
  * Github:         https://github.com/codewatchorg/Burp-AnonymousCloud
@@ -64,9 +64,10 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
   // Setup extension wide variables
   public IBurpExtenderCallbacks extCallbacks;
   public IExtensionHelpers extHelpers;
-  private static final String burpAnonCloudVersion = "0.1.3";
+  private static final String burpAnonCloudVersion = "0.1.4";
   private static final Pattern S3BucketPattern = Pattern.compile("((?:\\w+://)?(?:([\\w.-]+)\\.s3[\\w.-]*\\.amazonaws\\.com|s3(?:[\\w.-]*\\.amazonaws\\.com(?:(?::\\d+)?\\\\?/)*|://)([\\w.-]+))(?:(?::\\d+)?\\\\?/)?(?:.*?\\?.*Expires=(\\d+))?)", Pattern.CASE_INSENSITIVE);
-  private static final Pattern GoogleBucketPattern = Pattern.compile("((?:\\w+://)?(?:([\\w.-]+)\\.storage[\\w-]*\\.googleapis\\.com|(?:(?:console\\.cloud\\.google\\.com/storage/browser/|storage[\\w-]*\\.googleapis\\.com)(?:(?::\\d+)?\\\\?/)*|gs://)([\\w.-]+))(?:(?::\\d+)?\\\\?/([^\\s?'\"#]*))?(?:.*\\?.*Expires=(\\d+))?)", Pattern.CASE_INSENSITIVE);
+  private static final Pattern GoogleBucketPattern = Pattern.compile("((?:\\w+://)?(?:([\\w.-]+)\\.storage[\\w-]*\\.googleapis\\.com|(?:(?:console\\.cloud\\.google\\.com/storage/browser/|storage\\.cloud\\.google\\.com|storage[\\w-]*\\.googleapis\\.com)(?:(?::\\d+)?\\\\?/)*|gs://)([\\w.-]+))(?:(?::\\d+)?\\\\?/([^\\s?'\"#]*))?(?:.*\\?.*Expires=(\\d+))?)", Pattern.CASE_INSENSITIVE);
+  private static final Pattern GcpFirebase = Pattern.compile("([\\w.-]+\\.firebaseio\\.com/)", Pattern.CASE_INSENSITIVE );
   private static final Pattern AzureBucketPattern = Pattern.compile("(([\\w.-]+\\.blob\\.core\\.windows\\.net(?::\\d+)?\\\\?/[\\w.-]+)(?:.*?\\?.*se=([\\w%-]+))?)", Pattern.CASE_INSENSITIVE);
   public JPanel anonCloudPanel;
   private String awsAccessKey = "";
@@ -214,6 +215,7 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
       Matcher S3BucketMatch = S3BucketPattern.matcher(respBody);
       Matcher GoogleBucketMatch = GoogleBucketPattern.matcher(respBody);
       Matcher AzureBucketMatch = AzureBucketPattern.matcher(respBody);
+      Matcher GcpFirebaseMatch = GcpFirebase.matcher(respBody);
       
       // Create an issue noting an AWS S3 Bucket was identified in the response
       if (S3BucketMatch.find()) {
@@ -371,6 +373,28 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
           publicReadCheck("Azure", messageInfo, AzureBucketMatches, BucketName);
         } catch (Exception ignore) {}
       }
+      
+      // Check for open Firebase access
+      if (GcpFirebaseMatch.find()) {
+        List<int[]> GcpFirebaseMatches = getMatches(messageInfo.getResponse(), GcpFirebaseMatch.group(0).getBytes());
+        IScanIssue firebaseIdIssue = new CustomScanIssue(
+          messageInfo.getHttpService(),
+          extHelpers.analyzeRequest(messageInfo).getUrl(), 
+          new IHttpRequestResponse[] { extCallbacks.applyMarkers(messageInfo, null, GcpFirebaseMatches) },
+          "[Anonymous Cloud] Firebase Database Identified",
+          "The response body contained the following bucket: " + GcpFirebaseMatch.group(0),
+          "Information",
+          "Firm"
+        );
+        
+        // Add the Firebase identification issue
+        extCallbacks.addScanIssue(firebaseIdIssue);
+        
+        // Check for public read/write anonymous access
+        try {
+          gcpFirebaseCheck(messageInfo, GcpFirebaseMatches, GcpFirebaseMatch.group(0));
+        } catch (Exception ignore) {}
+      }
     }
     
     return null;
@@ -408,6 +432,9 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
         BucketName = BucketPart.split("/")[0];
       } else if (BucketUrl.startsWith("http://console.cloud.google.com") || BucketUrl.startsWith("https://console.cloud.google.com")) {
         String BucketPart = BucketUrl.replaceAll("(http|https)://console.cloud.google.com/storage/browser/", "");
+        BucketName = BucketPart.split("/")[0];
+      } else if (BucketUrl.startsWith("http://storage.cloud.google.com") || BucketUrl.startsWith("https://storage.cloud.google.com")) {
+        String BucketPart = BucketUrl.replaceAll("(http|https)://storage.cloud.google.com/", "");
         BucketName = BucketPart.split("/")[0];
       } else {
         BucketName = BucketUrl.split("\\.")[0].replaceAll("(http|https)://", "");
@@ -1320,6 +1347,76 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
         }
       } catch (Exception ignore) { }
     }
+  }
+  
+  // Perform anonymous public read access check for a discovered Firebase DB
+  private void gcpFirebaseCheck(IHttpRequestResponse messageInfo, List<int[]>matches, String firebaseDb) {
+    // Create a client to check Google for the Firebase DB
+    HttpClient readClient = HttpClientBuilder.create().build();
+    HttpGet readReq = new HttpGet("https://" + firebaseDb + ".json");
+
+    // Connect to GCP services for Firebase DB access
+    try {
+      HttpResponse readResp = readClient.execute(readReq);
+      String readRespHeaders = readResp.getStatusLine().toString();
+
+      // If the status is 200, it is public, otherwise doesn't exist
+      if (readRespHeaders.contains("200 OK")) {
+          
+        // Read the response and get the XML
+        BufferedReader rd = new BufferedReader(new InputStreamReader(readResp.getEntity().getContent()));
+        String respStr = "";
+        String line = "";
+          
+        // Put XML string together
+        while ((line = rd.readLine()) != null) {
+          respStr = respStr + line; 
+        }
+        // Create public access issue with object written
+        IScanIssue publicReadIssue = new CustomScanIssue(
+          messageInfo.getHttpService(),
+          extHelpers.analyzeRequest(messageInfo).getUrl(),
+          new IHttpRequestResponse[] { extCallbacks.applyMarkers(messageInfo, null, matches) },
+          "[Anonymous Cloud] Publicly Accessible Firebase Database",
+          "The following Firebase database is publicly readable: " + firebaseDb + ", and returned: " + respStr,
+          "Medium",
+          "Certain"
+        );
+          
+          // Add public write bucket access issue
+          extCallbacks.addScanIssue(publicReadIssue);
+        }
+      } catch (Exception ignore) { }
+    
+    // Create a client to check Google for the Firebase DB
+    String firebaseItem = "Burp-AnonymousCloud-" + genRandStr();
+    String firebaseContent = "Burp-AnonymousCloud Extension Public Write Test!";
+    HttpClient writeClient = HttpClientBuilder.create().build();
+    HttpPost writeReq = new HttpPost("https://" + firebaseDb + ".json");
+
+    // Connect to GCP services for Firebase DB access
+    try {
+      writeReq.setEntity(new StringEntity("{ \"" + firebaseItem + "\": \"" + firebaseContent + "\" }"));
+      HttpResponse writeResp = writeClient.execute(writeReq);
+      String writeRespHeaders = writeResp.getStatusLine().toString();
+
+      // If the status is 200, it is public, otherwise doesn't exist
+      if (writeRespHeaders.contains("200 OK")) {
+        // Create public access issue with object written
+        IScanIssue publicReadIssue = new CustomScanIssue(
+          messageInfo.getHttpService(),
+          extHelpers.analyzeRequest(messageInfo).getUrl(),
+          new IHttpRequestResponse[] { extCallbacks.applyMarkers(messageInfo, null, matches) },
+          "[Anonymous Cloud] Publicly Writable Firebase Database",
+          "The Firebase database " + firebaseDb + " had a value of: " + firebaseItem + " written to it.",
+          "High",
+          "Certain"
+        );
+          
+          // Add public write bucket access issue
+          extCallbacks.addScanIssue(publicReadIssue);
+        }
+      } catch (Exception ignore) { }
   }
   
   @Override
