@@ -1,6 +1,6 @@
 /*
  * Name:           Burp Anonymous Cloud
- * Version:        0.1.4
+ * Version:        0.1.5
  * Date:           1/21/2019
  * Author:         Josh Berry - josh.berry@codewatch.org
  * Github:         https://github.com/codewatchorg/Burp-AnonymousCloud
@@ -64,7 +64,7 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
   // Setup extension wide variables
   public IBurpExtenderCallbacks extCallbacks;
   public IExtensionHelpers extHelpers;
-  private static final String burpAnonCloudVersion = "0.1.4";
+  private static final String burpAnonCloudVersion = "0.1.5";
   private static final Pattern S3BucketPattern = Pattern.compile("((?:\\w+://)?(?:([\\w.-]+)\\.s3[\\w.-]*\\.amazonaws\\.com|s3(?:[\\w.-]*\\.amazonaws\\.com(?:(?::\\d+)?\\\\?/)*|://)([\\w.-]+))(?:(?::\\d+)?\\\\?/)?(?:.*?\\?.*Expires=(\\d+))?)", Pattern.CASE_INSENSITIVE);
   private static final Pattern GoogleBucketPattern = Pattern.compile("((?:\\w+://)?(?:([\\w.-]+)\\.storage[\\w-]*\\.googleapis\\.com|(?:(?:console\\.cloud\\.google\\.com/storage/browser/|storage\\.cloud\\.google\\.com|storage[\\w-]*\\.googleapis\\.com)(?:(?::\\d+)?\\\\?/)*|gs://)([\\w.-]+))(?:(?::\\d+)?\\\\?/([^\\s?'\"#]*))?(?:.*\\?.*Expires=(\\d+))?)", Pattern.CASE_INSENSITIVE);
   private static final Pattern GcpFirebase = Pattern.compile("([\\w.-]+\\.firebaseio\\.com/)", Pattern.CASE_INSENSITIVE );
@@ -348,7 +348,7 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
           } catch (Exception ignore) {}
         }
       }
-
+      
       // Create an issue noting an Azure Bucket was identified in the response
       if (AzureBucketMatch.find()) {
         List<int[]> AzureBucketMatches = getMatches(messageInfo.getResponse(), AzureBucketMatch.group(0).getBytes());
@@ -368,10 +368,27 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
         // Get the actual name of the bucket
         String BucketName = getBucketName("Azure", AzureBucketMatch.group(0));
         
-        // Check for public read/write anonymous access
-        try {
-          publicReadCheck("Azure", messageInfo, AzureBucketMatches, BucketName);
-        } catch (Exception ignore) {}
+        // Perform anonymous checks for Google
+        if (validateBucket("Azure", "anonymous", BucketName)) {
+            
+          IScanIssue azureAccountIssue = new CustomScanIssue(
+            messageInfo.getHttpService(),
+            extHelpers.analyzeRequest(messageInfo).getUrl(), 
+            new IHttpRequestResponse[] { extCallbacks.applyMarkers(messageInfo, null, AzureBucketMatches) },
+            "[Anonymous Cloud] Azure Storage Container Account Identified",
+            "The response confirmed the Azure Storage account exists: " + AzureBucketMatch.group(0),
+            "Low",
+            "Certain"
+          );
+            
+          // Add the Azure bucket identification issue
+          extCallbacks.addScanIssue(azureAccountIssue);
+        
+          // Check for public read/write anonymous access
+          try {
+            publicReadCheck("Azure", messageInfo, AzureBucketMatches, BucketName);
+          } catch (Exception ignore) {}
+        }
       }
       
       // Check for open Firebase access
@@ -382,7 +399,7 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
           extHelpers.analyzeRequest(messageInfo).getUrl(), 
           new IHttpRequestResponse[] { extCallbacks.applyMarkers(messageInfo, null, GcpFirebaseMatches) },
           "[Anonymous Cloud] Firebase Database Identified",
-          "The response body contained the following bucket: " + GcpFirebaseMatch.group(0),
+          "The response body contained the following database: " + GcpFirebaseMatch.group(0),
           "Information",
           "Firm"
         );
@@ -465,7 +482,26 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
         return false;
       }
     } else if (bucketType.equals("Azure")) {
-      return false;
+      // Create a client to check Azure for the storage account
+        HttpClient client = HttpClientBuilder.create().build();
+        HttpGet req = new HttpGet("https://" + BucketName + "?restype=container&comp=list");
+        HttpResponse resp;
+        Boolean bucketExists = false;
+      
+        // Connect to Azure services
+        try {
+          resp = client.execute(req);
+          String headers = resp.getStatusLine().toString();
+        
+          // If we get a status then it exists
+          if (headers.contains("200 OK") || headers.contains("401 Unauthorized") || headers.contains("404 The specified resource does not exist.")) {
+            bucketExists = true;
+          } else {
+            bucketExists = false;
+          }  
+        } catch (Exception ignore) {}
+        
+        return bucketExists;
     } else if (bucketType.equals("Google")) {
       if (authType.equals("anonymous")) {
         // Create a client to check Google for the bucket
