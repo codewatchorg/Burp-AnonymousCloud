@@ -1,11 +1,11 @@
 /*
- * Name:           Burp Indicators of Vulnerability
- * Version:        0.1.1
- * Date:           1/17/2019
+ * Name:           Burp Anonymous Cloud
+ * Version:        0.1.3
+ * Date:           1/21/2019
  * Author:         Josh Berry - josh.berry@codewatch.org
  * Github:         https://github.com/codewatchorg/Burp-AnonymousCloud
  * 
- * Description:    This plugin checks application responses and in some cases browser requests for indications of SQLi, XXE, and other vulnerabilities or attack points for these issues.
+ * Description:    This plugin checks for insecure AWS/Azure/Google application configurations
  * 
  * Contains regex work from Cloud Storage Tester by VirtueSecurity: https://github.com/VirtueSecurity/aws-extender
  *
@@ -54,13 +54,17 @@ import org.apache.http.entity.StringEntity;
 import java.util.Iterator;
 import org.json.JSONObject;
 import org.json.JSONArray;
+import org.xml.sax.*;
+import org.xml.sax.helpers.*;
+import javax.xml.parsers.*;
+import java.io.StringReader;
 
 public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
 
   // Setup extension wide variables
   public IBurpExtenderCallbacks extCallbacks;
   public IExtensionHelpers extHelpers;
-  private static final String burpAnonCloudVersion = "0.1.1";
+  private static final String burpAnonCloudVersion = "0.1.3";
   private static final Pattern S3BucketPattern = Pattern.compile("((?:\\w+://)?(?:([\\w.-]+)\\.s3[\\w.-]*\\.amazonaws\\.com|s3(?:[\\w.-]*\\.amazonaws\\.com(?:(?::\\d+)?\\\\?/)*|://)([\\w.-]+))(?:(?::\\d+)?\\\\?/)?(?:.*?\\?.*Expires=(\\d+))?)", Pattern.CASE_INSENSITIVE);
   private static final Pattern GoogleBucketPattern = Pattern.compile("((?:\\w+://)?(?:([\\w.-]+)\\.storage[\\w-]*\\.googleapis\\.com|(?:(?:console\\.cloud\\.google\\.com/storage/browser/|storage[\\w-]*\\.googleapis\\.com)(?:(?::\\d+)?\\\\?/)*|gs://)([\\w.-]+))(?:(?::\\d+)?\\\\?/([^\\s?'\"#]*))?(?:.*\\?.*Expires=(\\d+))?)", Pattern.CASE_INSENSITIVE);
   private static final Pattern AzureBucketPattern = Pattern.compile("(([\\w.-]+\\.blob\\.core\\.windows\\.net(?::\\d+)?\\\\?/[\\w.-]+)(?:.*?\\?.*se=([\\w%-]+))?)", Pattern.CASE_INSENSITIVE);
@@ -124,7 +128,7 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
     // Set values for labels, panels, locations, for Google stuff
     // Google Bearer Token
     anonCloudGoogleBearerLabel.setText("Google Bearer Token:");
-    anonCloudGoogleBearerDescLabel.setText("Any Google authenticated user test: Google Bearer Token (use 'glcoud auth print-access-token')");
+    anonCloudGoogleBearerDescLabel.setText("Any Google authenticated user test: Google Bearer Token (use 'gcloud auth print-access-token')");
     anonCloudGoogleBearerLabel.setBounds(16, 85, 125, 20);
     anonCloudGoogleBearerText.setBounds(146, 82, 310, 26);
     anonCloudGoogleBearerDescLabel.setBounds(606, 85, 600, 20);
@@ -396,6 +400,7 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
         BucketName = BucketName.replaceAll("\\.s3.*\\.amazonaws\\.com", "");
       }
     } else if (BucketType.equals("Azure")) {
+      BucketName = BucketUrl;
     } else if (BucketType.equals("Google")) {
       // Get the actual bucket name in the form of bucket.storage.googleapis.com, storage.googleapis.com/storage/v1/b/bucket, or console.cloud.google.com/storage/browser/bucket
       if (BucketUrl.startsWith("http://storage.googleapis.com") || BucketUrl.startsWith("https://storage.googleapis.com")) {
@@ -534,7 +539,7 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
         int totalBuckets = bucketObjs.size();
         String ObjList = "";
         
-        // Loop through our list ot build a string of all objects
+        // Loop through our list to build a string of all objects
         for (Iterator<String> it = bucketObjs.iterator(); it.hasNext();) {
           String obj = it.next();
 
@@ -621,7 +626,7 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
           int totalBuckets = bucketObjs.length();
           String ObjList = "";
         
-          // Loop through our list ot build a string of all objects
+          // Loop through our list to build a string of all objects
           for (int i = 0; i < bucketObjs.length(); i++) {
             String obj = bucketObjs.getJSONObject(i).getString("name");
 
@@ -654,6 +659,110 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
           extCallbacks.addScanIssue(publicReadIssue);
         }
       } catch (Exception ignore) {}
+    } else if (BucketType.equals("Azure")) {
+        
+      // Create a client to check Azure for the bucket
+      HttpClient bucketClient = HttpClientBuilder.create().build();
+      HttpGet reqBucket = new HttpGet("https://" + BucketName + "?restype=container&comp=list");
+      
+      // Connect to Azure services for bucket access
+      try {
+        HttpResponse resp = bucketClient.execute(reqBucket);
+        String headers = resp.getStatusLine().toString();
+        
+        // If the status is 200, it is public, otherwise it isn't
+        if (headers.contains("200 OK")) {
+            
+          // Read the response and get the XML
+          BufferedReader rd = new BufferedReader(new InputStreamReader(resp.getEntity().getContent()));
+          String xmlStr = "";
+          String line = "";
+          int lineOne = 0;
+          ArrayList<String> blobContents = new ArrayList<String>();
+          
+          // Put XML string together
+          while ((line = rd.readLine()) != null) {
+            if (lineOne == 0) {
+              xmlStr = line.substring(3, line.length());
+            } else {
+              xmlStr = xmlStr + line; 
+            }
+          }
+          
+          // Read XML results from public bucket
+          SAXParserFactory factory = SAXParserFactory.newInstance();
+          SAXParser saxParser = factory.newSAXParser();
+          
+          // Create a handler for the XML
+          DefaultHandler handler = new DefaultHandler() {
+ 
+            // boolean to confirm name value
+            boolean isName = false;
+            
+            // setup a handler for each element
+            @Override
+            public void startElement(String uri, String localName, String qName, Attributes attributes) throws SAXException {
+
+              // if the element contains blobs, lookup details
+              if (qName.equalsIgnoreCase("Name")) {
+                isName = true;
+              } else {
+                isName = false;
+              }
+            }
+            
+            // setup hander for data in between tags
+            @Override
+            public void characters(char[] ch, int start, int length) {
+              if (isName) {
+                blobContents.add(new String(ch, start, length));
+              }
+            }
+          };
+ 
+          // process the XML data
+          InputSource xmlSrc = new InputSource(new StringReader(xmlStr));
+          saxParser.parse(xmlSrc, handler);
+          
+          // Setup basic variables for enumerating and building string of objects
+          int firstBucket = 0;
+          int bucketCounter = 1;
+          int totalBuckets = blobContents.size();
+          String ObjList = "";
+        
+          // Loop through our list to build a string of all objects
+          for (int i = 0; i < blobContents.size(); i++) {
+            String obj = blobContents.get(i);
+
+            if (firstBucket == 0 && totalBuckets >= 1) {
+              ObjList = obj;
+              firstBucket = 1;
+            } else if (totalBuckets == 2 && firstBucket == 1) {
+              ObjList = ObjList + " and " + obj;
+            } else if (firstBucket == 1 && bucketCounter == totalBuckets) {
+              ObjList = ObjList + ", and " + obj;
+            } else {
+              ObjList = ObjList + ", " + obj;
+            }
+          
+            bucketCounter++;
+          }
+          
+          // Create public read access issue with the list of objects included
+          IScanIssue publicReadIssue = new CustomScanIssue(
+            messageInfo.getHttpService(),
+            extHelpers.analyzeRequest(messageInfo).getUrl(),
+            new IHttpRequestResponse[] { extCallbacks.applyMarkers(messageInfo, null, matches) },
+            "[Anonymous Cloud] Publicly Accessible Azure Storage Container",
+            "The following bucket contents were enumerated from " + BucketName + ": " + ObjList + ".",
+            "Medium",
+            "Certain"
+          );
+
+          // Add public read access issue
+          extCallbacks.addScanIssue(publicReadIssue);
+        }
+      } catch (Exception ignore) { }
     }
   }
   
@@ -693,7 +802,7 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
           int totalBuckets = bucketObjs.length();
           String ObjRoleList = "";
         
-          // Loop through our list ot build a string of all objects
+          // Loop through our list to build a string of all objects
           for (int i = 0; i < bucketObjs.length(); i++) {
             String objRole = bucketObjs.getJSONObject(i).getString("role");
             JSONArray memberObjs = bucketObjs.getJSONObject(i).getJSONArray("members");
@@ -885,7 +994,7 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
       int totalBuckets = bucketObjs.size();
       String ObjList = "";
         
-      // Loop through our list ot build a string of all objects
+      // Loop through our list to build a string of all objects
       for (Iterator<String> it = bucketObjs.iterator(); it.hasNext();) {
         String obj = it.next();
 
@@ -975,7 +1084,7 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
           int totalBuckets = bucketObjs.length();
           String ObjList = "";
         
-          // Loop through our list ot build a string of all objects
+          // Loop through our list to build a string of all objects
           for (int i = 0; i < bucketObjs.length(); i++) {
             String obj = bucketObjs.getJSONObject(i).getString("name");
 
@@ -1054,7 +1163,7 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
           int totalBuckets = bucketObjs.length();
           String ObjRoleList = "";
         
-          // Loop through our list ot build a string of all objects
+          // Loop through our list to build a string of all objects
           for (int i = 0; i < bucketObjs.length(); i++) {
             String objRole = bucketObjs.getJSONObject(i).getString("role");
             JSONArray memberObjs = bucketObjs.getJSONObject(i).getJSONArray("members");
