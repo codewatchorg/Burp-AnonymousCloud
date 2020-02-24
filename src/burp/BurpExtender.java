@@ -1,6 +1,6 @@
 /*
  * Name:           Burp Anonymous Cloud
- * Version:        0.1.6
+ * Version:        0.1.7
  * Date:           1/21/2019
  * Author:         Josh Berry - josh.berry@codewatch.org
  * Github:         https://github.com/codewatchorg/Burp-AnonymousCloud
@@ -64,7 +64,7 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
   // Setup extension wide variables
   public IBurpExtenderCallbacks extCallbacks;
   public IExtensionHelpers extHelpers;
-  private static final String burpAnonCloudVersion = "0.1.6";
+  private static final String burpAnonCloudVersion = "0.1.7";
   private static final Pattern S3BucketPattern = Pattern.compile("((?:\\w+://)?(?:([\\w.-]+)\\.s3[\\w.-]*\\.amazonaws\\.com|s3(?:[\\w.-]*\\.amazonaws\\.com(?:(?::\\d+)?\\\\?/)*|://)([\\w.-]+))(?:(?::\\d+)?\\\\?/)?(?:.*?\\?.*Expires=(\\d+))?)", Pattern.CASE_INSENSITIVE);
   private static final Pattern GoogleBucketPattern = Pattern.compile("((?:\\w+://)?(?:([\\w.-]+)\\.storage[\\w-]*\\.googleapis\\.com|(?:(?:console\\.cloud\\.google\\.com/storage/browser/|storage\\.cloud\\.google\\.com|storage[\\w-]*\\.googleapis\\.com)(?:(?::\\d+)?\\\\?/)*|gs://)([\\w.-]+))(?:(?::\\d+)?\\\\?/([^\\s?'\"#]*))?(?:.*\\?.*Expires=(\\d+))?)", Pattern.CASE_INSENSITIVE);
   private static final Pattern GcpFirebase = Pattern.compile("([\\w.-]+\\.firebaseio\\.com/)", Pattern.CASE_INSENSITIVE );
@@ -72,6 +72,7 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
   private static final Pattern AzureTablePattern = Pattern.compile("(([\\w.-]+\\.table\\.core\\.windows\\.net(?::\\d+)?\\\\?/[\\w.-]+)(?:.*?\\?.*se=([\\w%-]+))?)", Pattern.CASE_INSENSITIVE);
   private static final Pattern AzureQueuePattern = Pattern.compile("(([\\w.-]+\\.queue\\.core\\.windows\\.net(?::\\d+)?\\\\?/[\\w.-]+)(?:.*?\\?.*se=([\\w%-]+))?)", Pattern.CASE_INSENSITIVE);
   private static final Pattern AzureFilePattern = Pattern.compile("(([\\w.-]+\\.file\\.core\\.windows\\.net(?::\\d+)?\\\\?/[\\w.-]+)(?:.*?\\?.*se=([\\w%-]+))?)", Pattern.CASE_INSENSITIVE);
+  private static final Pattern AzureCosmosPattern = Pattern.compile("(([\\w.-]+\\.documents\\.azure\\.com(?::\\d+)?\\\\?/[\\w.-]+)(?:.*?\\?.*se=([\\w%-]+))?)", Pattern.CASE_INSENSITIVE);
   public JPanel anonCloudPanel;
   private String awsAccessKey = "";
   private String awsSecretAccessKey = "";
@@ -221,6 +222,7 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
       Matcher AzureTableMatch = AzureTablePattern.matcher(respBody);
       Matcher AzureQueueMatch = AzureQueuePattern.matcher(respBody);
       Matcher AzureFileMatch = AzureFilePattern.matcher(respBody);
+      Matcher AzureCosmosMatch = AzureCosmosPattern.matcher(respBody);
       Matcher GcpFirebaseMatch = GcpFirebase.matcher(respBody);
       
       // Create an issue noting an AWS S3 Bucket was identified in the response
@@ -446,6 +448,23 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
         
         // Add the Azure bucket identification issue
         extCallbacks.addScanIssue(azureFileIdIssue);
+      }
+      
+      // Create an issue noting an Azure Cosmos DB was identified in the response
+      if (AzureCosmosMatch.find()) {
+        List<int[]> AzureCosmosMatches = getMatches(messageInfo.getResponse(), AzureCosmosMatch.group(0).getBytes());
+        IScanIssue azureCosmosIdIssue = new CustomScanIssue(
+          messageInfo.getHttpService(),
+          extHelpers.analyzeRequest(messageInfo).getUrl(), 
+          new IHttpRequestResponse[] { extCallbacks.applyMarkers(messageInfo, null, AzureCosmosMatches) },
+          "[Anonymous Cloud] Azure Cosmos Database Identified",
+          "The response body contained the following Cosmos DB: " + AzureCosmosMatch.group(0),
+          "Information",
+          "Firm"
+        );
+        
+        // Add the Azure bucket identification issue
+        extCallbacks.addScanIssue(azureCosmosIdIssue);
       }
       
       // Check for open Firebase access
