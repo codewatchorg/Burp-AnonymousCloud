@@ -1,6 +1,6 @@
 /*
  * Name:           Burp Anonymous Cloud
- * Version:        0.1.5
+ * Version:        0.1.6
  * Date:           1/21/2019
  * Author:         Josh Berry - josh.berry@codewatch.org
  * Github:         https://github.com/codewatchorg/Burp-AnonymousCloud
@@ -64,11 +64,14 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
   // Setup extension wide variables
   public IBurpExtenderCallbacks extCallbacks;
   public IExtensionHelpers extHelpers;
-  private static final String burpAnonCloudVersion = "0.1.5";
+  private static final String burpAnonCloudVersion = "0.1.6";
   private static final Pattern S3BucketPattern = Pattern.compile("((?:\\w+://)?(?:([\\w.-]+)\\.s3[\\w.-]*\\.amazonaws\\.com|s3(?:[\\w.-]*\\.amazonaws\\.com(?:(?::\\d+)?\\\\?/)*|://)([\\w.-]+))(?:(?::\\d+)?\\\\?/)?(?:.*?\\?.*Expires=(\\d+))?)", Pattern.CASE_INSENSITIVE);
   private static final Pattern GoogleBucketPattern = Pattern.compile("((?:\\w+://)?(?:([\\w.-]+)\\.storage[\\w-]*\\.googleapis\\.com|(?:(?:console\\.cloud\\.google\\.com/storage/browser/|storage\\.cloud\\.google\\.com|storage[\\w-]*\\.googleapis\\.com)(?:(?::\\d+)?\\\\?/)*|gs://)([\\w.-]+))(?:(?::\\d+)?\\\\?/([^\\s?'\"#]*))?(?:.*\\?.*Expires=(\\d+))?)", Pattern.CASE_INSENSITIVE);
   private static final Pattern GcpFirebase = Pattern.compile("([\\w.-]+\\.firebaseio\\.com/)", Pattern.CASE_INSENSITIVE );
   private static final Pattern AzureBucketPattern = Pattern.compile("(([\\w.-]+\\.blob\\.core\\.windows\\.net(?::\\d+)?\\\\?/[\\w.-]+)(?:.*?\\?.*se=([\\w%-]+))?)", Pattern.CASE_INSENSITIVE);
+  private static final Pattern AzureTablePattern = Pattern.compile("(([\\w.-]+\\.table\\.core\\.windows\\.net(?::\\d+)?\\\\?/[\\w.-]+)(?:.*?\\?.*se=([\\w%-]+))?)", Pattern.CASE_INSENSITIVE);
+  private static final Pattern AzureQueuePattern = Pattern.compile("(([\\w.-]+\\.queue\\.core\\.windows\\.net(?::\\d+)?\\\\?/[\\w.-]+)(?:.*?\\?.*se=([\\w%-]+))?)", Pattern.CASE_INSENSITIVE);
+  private static final Pattern AzureFilePattern = Pattern.compile("(([\\w.-]+\\.file\\.core\\.windows\\.net(?::\\d+)?\\\\?/[\\w.-]+)(?:.*?\\?.*se=([\\w%-]+))?)", Pattern.CASE_INSENSITIVE);
   public JPanel anonCloudPanel;
   private String awsAccessKey = "";
   private String awsSecretAccessKey = "";
@@ -215,6 +218,9 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
       Matcher S3BucketMatch = S3BucketPattern.matcher(respBody);
       Matcher GoogleBucketMatch = GoogleBucketPattern.matcher(respBody);
       Matcher AzureBucketMatch = AzureBucketPattern.matcher(respBody);
+      Matcher AzureTableMatch = AzureTablePattern.matcher(respBody);
+      Matcher AzureQueueMatch = AzureQueuePattern.matcher(respBody);
+      Matcher AzureFileMatch = AzureFilePattern.matcher(respBody);
       Matcher GcpFirebaseMatch = GcpFirebase.matcher(respBody);
       
       // Create an issue noting an AWS S3 Bucket was identified in the response
@@ -356,7 +362,7 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
           messageInfo.getHttpService(),
           extHelpers.analyzeRequest(messageInfo).getUrl(), 
           new IHttpRequestResponse[] { extCallbacks.applyMarkers(messageInfo, null, AzureBucketMatches) },
-          "[Anonymous Cloud] Azure Storage Container Identified",
+          "[Anonymous Cloud] Azure Storage Container Identified - Blob",
           "The response body contained the following bucket: " + AzureBucketMatch.group(0),
           "Information",
           "Firm"
@@ -368,14 +374,14 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
         // Get the actual name of the bucket
         String BucketName = getBucketName("Azure", AzureBucketMatch.group(0));
         
-        // Perform anonymous checks for Google
+        // Perform anonymous checks for Azure
         if (validateBucket("Azure", "anonymous", BucketName)) {
             
           IScanIssue azureAccountIssue = new CustomScanIssue(
             messageInfo.getHttpService(),
             extHelpers.analyzeRequest(messageInfo).getUrl(), 
             new IHttpRequestResponse[] { extCallbacks.applyMarkers(messageInfo, null, AzureBucketMatches) },
-            "[Anonymous Cloud] Azure Storage Container Account Identified",
+            "[Anonymous Cloud] Azure Storage Container Blob Account Identified",
             "The response confirmed the Azure Storage account exists: " + AzureBucketMatch.group(0),
             "Low",
             "Certain"
@@ -389,6 +395,57 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
             publicReadCheck("Azure", messageInfo, AzureBucketMatches, BucketName);
           } catch (Exception ignore) {}
         }
+      }
+      
+      // Create an issue noting an Azure Table was identified in the response
+      if (AzureTableMatch.find()) {
+        List<int[]> AzureTableMatches = getMatches(messageInfo.getResponse(), AzureTableMatch.group(0).getBytes());
+        IScanIssue azureTableIdIssue = new CustomScanIssue(
+          messageInfo.getHttpService(),
+          extHelpers.analyzeRequest(messageInfo).getUrl(), 
+          new IHttpRequestResponse[] { extCallbacks.applyMarkers(messageInfo, null, AzureTableMatches) },
+          "[Anonymous Cloud] Azure Storage Container Identified - Table",
+          "The response body contained the following table: " + AzureTableMatch.group(0),
+          "Information",
+          "Firm"
+        );
+        
+        // Add the Azure bucket identification issue
+        extCallbacks.addScanIssue(azureTableIdIssue);
+      }
+      
+      // Create an issue noting an Azure Queue was identified in the response
+      if (AzureQueueMatch.find()) {
+        List<int[]> AzureQueueMatches = getMatches(messageInfo.getResponse(), AzureQueueMatch.group(0).getBytes());
+        IScanIssue azureQueueIdIssue = new CustomScanIssue(
+          messageInfo.getHttpService(),
+          extHelpers.analyzeRequest(messageInfo).getUrl(), 
+          new IHttpRequestResponse[] { extCallbacks.applyMarkers(messageInfo, null, AzureQueueMatches) },
+          "[Anonymous Cloud] Azure Storage Container Identified - Queue",
+          "The response body contained the following queue: " + AzureQueueMatch.group(0),
+          "Information",
+          "Firm"
+        );
+        
+        // Add the Azure bucket identification issue
+        extCallbacks.addScanIssue(azureQueueIdIssue);
+      }
+      
+      // Create an issue noting an Azure Share was identified in the response
+      if (AzureFileMatch.find()) {
+        List<int[]> AzureFileMatches = getMatches(messageInfo.getResponse(), AzureFileMatch.group(0).getBytes());
+        IScanIssue azureFileIdIssue = new CustomScanIssue(
+          messageInfo.getHttpService(),
+          extHelpers.analyzeRequest(messageInfo).getUrl(), 
+          new IHttpRequestResponse[] { extCallbacks.applyMarkers(messageInfo, null, AzureFileMatches) },
+          "[Anonymous Cloud] Azure Storage Container Identified - Share",
+          "The response body contained the following share: " + AzureFileMatch.group(0),
+          "Information",
+          "Firm"
+        );
+        
+        // Add the Azure bucket identification issue
+        extCallbacks.addScanIssue(azureFileIdIssue);
       }
       
       // Check for open Firebase access
