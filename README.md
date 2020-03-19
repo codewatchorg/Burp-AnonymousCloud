@@ -1,5 +1,5 @@
 # Burp-AnonymousCloud
-Burp extension that performs a passive scan to identify cloud buckets and then test them for publicly accessible vulnerabilities
+Burp extension that performs a passive scan to identify cloud buckets and then test them for publicly accessible vulnerabilities.
 
 The extension looks at all responses and will note:
 1. AWS S3 bucket URLs.
@@ -26,6 +26,21 @@ The extension checks the following things in AWS/Google as an authenticated AWS/
 6. Any authenticated Google user accessible ACLs on Google Storage containers which will be enumerated by the extension.
 7. Any authenticated Google user writable Google Storage containers, to which a sample file will be written.
 
+The extension performs subdomain takeover testing for the following resoures:
+1. CNAMEs pointing to non-existent AWS S3 buckets.
+2. CNAMEs pointing to non-existent Azure resources.
+3. CNAMEs pointing to non-existent Heroku services.
+4. CNAMEs pointing to non-existent Github pages.
+
+Subdomains are collected from the following:
+1. HackerTarget
+2. BufferOver
+3. Wayback Machine
+4. Crt.sh
+5. File list
+6. Shodan (with an API key)
+7. Censys (with an API key)
+
 Usage
 =====
 
@@ -35,4 +50,4 @@ All you have to do is add the JAR as an extension in Burp, add the appropriate t
 Future
 ======
 
-Continue adding features to support identification and enumeration of other resources such as firebaseio.com
+Continue adding features to support identification and enumeration of other resources such Azure database.

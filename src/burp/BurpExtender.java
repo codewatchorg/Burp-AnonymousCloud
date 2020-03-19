@@ -1,6 +1,6 @@
 /*
  * Name:           Burp Anonymous Cloud
- * Version:        0.1.7
+ * Version:        0.1.8
  * Date:           1/21/2019
  * Author:         Josh Berry - josh.berry@codewatch.org
  * Github:         https://github.com/codewatchorg/Burp-AnonymousCloud
@@ -18,10 +18,15 @@ import java.util.ArrayList;
 import java.util.Random;
 import java.io.InputStreamReader;
 import java.io.BufferedReader;
+import java.io.FileReader;
 import java.io.PrintWriter;
+import java.io.File;
 import java.net.URL;
+import java.net.InetAddress;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.Base64;
+import java.nio.charset.StandardCharsets;
 import java.awt.Component;
 import javax.swing.JPanel;
 import javax.swing.JLabel;
@@ -29,6 +34,9 @@ import javax.swing.JTextField;
 import javax.swing.JButton;
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
+import javax.swing.JCheckBox;
+import javax.swing.JFileChooser;
+import javax.swing.filechooser.FileNameExtensionFilter;
 import com.amazonaws.services.s3.AmazonS3;
 import com.amazonaws.services.s3.AmazonS3ClientBuilder;
 import com.amazonaws.auth.AWSCredentials;
@@ -51,6 +59,7 @@ import org.apache.http.client.methods.HttpGet;
 import org.apache.http.client.methods.HttpPost;
 import org.apache.http.impl.client.HttpClientBuilder;
 import org.apache.http.entity.StringEntity;
+import org.apache.http.util.EntityUtils;
 import java.util.Iterator;
 import org.json.JSONObject;
 import org.json.JSONArray;
@@ -58,13 +67,689 @@ import org.xml.sax.*;
 import org.xml.sax.helpers.*;
 import javax.xml.parsers.*;
 import java.io.StringReader;
+import javax.naming.directory.InitialDirContext;
+import javax.naming.Context;
+import java.util.Properties;
+
+class SubdomainTakeover implements IBurpExtender, Runnable {
+  private Thread t;
+  private final String domainname;
+  private String censysApiKey = "";
+  private String censysApiSecret = "";
+  private Boolean isShodanSet = false;
+  private Boolean isCensysSet = false;
+  private Boolean isFileListSet = false;
+  private final PrintWriter printOut;
+  private ArrayList subdomainList = new ArrayList();
+  private static final String certTransUrl = "https://crt.sh/?output=json&q="; 
+  private static final String bufferOverUrl = "https://dns.bufferover.run/dns?q=";
+  private static final String waybackMachineUrl = "http://web.archive.org/cdx/search/cdx?output=json&url=";
+  private static final String hackerTargetUrl = "http://api.hackertarget.com/hostsearch/?q=";
+  private static final String shodanBaseUrl = "https://api.shodan.io/dns/domain/";
+  private static final String censysBaseUrl = "https://censys.io/api/v1/search/";
+  private static final Pattern censysCertPattern = Pattern.compile("([\\w.-]*CN\\=(.*)?)", Pattern.CASE_INSENSITIVE );
+  private String shodanUrl = "";
+  private String censysUrl = "";
+  private File subdomainFileList;
+  private IBurpExtenderCallbacks extCallbacks;
+  private IHttpRequestResponse messageInfo;
+  public IExtensionHelpers extHelpers;
+  
+  public SubdomainTakeover(IBurpExtenderCallbacks callbacks, IHttpRequestResponse messageInfo, String fqdn, PrintWriter burpPrint, String shodan, String censys, File subdomainFile) {
+    domainname = fqdn;
+    printOut = burpPrint;
+    extCallbacks = callbacks;
+    this.messageInfo = messageInfo;
+    extHelpers = extCallbacks.getHelpers();
+    
+    try {
+      if (subdomainFile.exists() && subdomainFile.length() > 0) {
+        subdomainFileList = subdomainFile;
+        isFileListSet = true;
+      }
+    } catch (Exception ignore) {}
+
+    if (shodan.matches("^[a-zA-Z0-9]+")) {
+      shodanUrl = shodanBaseUrl + domainname + "?key=" + shodan;
+      isShodanSet = true;
+    }
+
+    if (censys.length() > 10 && censys.split(":").length == 2) {
+      if (censys.split(":")[0].matches("^[a-zA-Z0-9\\-]+") && censys.split(":")[1].matches("^[a-zA-Z0-9]+")) {
+        censysApiKey = censys.split(":")[0];
+        censysApiSecret = censys.split(":")[1];
+        censysUrl = censysBaseUrl + "certificates";
+        isCensysSet = true;
+      }
+    }
+  }
+  
+  // helper method to search a response for occurrences of a literal match string
+  // and return a list of start/end offsets
+  private List<int[]> getMatches(byte[] response, byte[] match) {
+    List<int[]> matches = new ArrayList<>();
+
+    int start = 0;
+    while (start < response.length) {
+      start = extHelpers.indexOf(response, match, true, start, response.length);
+      if (start == -1)
+        break;
+      matches.add(new int[] { start, start + match.length });
+      start += match.length;
+    }
+        
+    return matches;
+  }
+  
+  public void start() {
+    if (t == null) {
+      t = new Thread(this, domainname);
+      t.start();
+    }
+  }
+  
+  // Create domains from file list
+  private void getListSubdomains() {
+    // Try to open and read the file
+    try {
+      BufferedReader rd = new BufferedReader(new FileReader(subdomainFileList));
+      String line = null;
+      
+      printOut.println("Building a list from the file: " + subdomainFileList.getPath());
+      // Loop through each line
+      while((line = rd.readLine()) != null) {
+          
+        // Add to subdomain list if unique
+        if (!subdomainList.contains(line + "." + domainname) && !line.equals(domainname) && !line.contains("*")) {
+          subdomainList.add(line + "." + domainname);
+        }
+      }
+    } catch (Exception ignore) {}
+  }
+  
+  // Get subdomains from Censys, because they are different than the rest
+  private void getCensysSubdomains(String urlType, String srcUrl) {
+    // Create a client to check the source URL for domains
+    String credentials = Base64.getEncoder().encodeToString((censysApiKey + ":" + censysApiSecret).getBytes(StandardCharsets.UTF_8));
+    HttpPost reqSubdomain = new HttpPost(srcUrl);
+    HttpClient subdomainClient = HttpClientBuilder.create().build();
+    
+    // Connect to the site to get subdomains
+    try {
+      reqSubdomain.setHeader("Authorization", "Basic " + credentials);
+      reqSubdomain.setEntity(new StringEntity("{ \"query\": \"" + domainname + "\" }"));
+      HttpResponse resp = subdomainClient.execute(reqSubdomain);
+      String headers = resp.getStatusLine().toString();
+      printOut.println("Building a request to: " + srcUrl);
+
+      // If the status is 200, then hopefully we got JSON or plaintext response with subdomains
+      if (headers.contains("200 OK")) {
+          
+        // Read the response and get the JSON
+        BufferedReader rd = new BufferedReader(new InputStreamReader(resp.getEntity().getContent()));
+        String jsonStr = "";
+        String line = "";
+        while ((line = rd.readLine()) != null) {
+          jsonStr = jsonStr + line;
+        }
+
+        // Read JSON results
+        JSONObject json = new JSONObject(jsonStr);
+        JSONArray subdomainObjs = json.getJSONArray("results");
+          
+        // Loop through our list to build create unique objects
+        for (int i = 0; i < subdomainObjs.length(); i++) {
+          String obj = subdomainObjs.getJSONObject(i).getString("parsed.subject_dn");
+          Matcher censysCertMatcher = censysCertPattern.matcher(obj);
+          
+          if (censysCertMatcher.find()) {
+            String subdomainLine = censysCertMatcher.group(0).split("=")[1];
+            
+            // Add to subdomain list if unique
+            if (!subdomainList.contains(subdomainLine) && !subdomainLine.equals(domainname) && !subdomainLine.contains("*")) {
+              subdomainList.add(subdomainLine);
+            }
+          }
+        }
+      } else { }
+    } catch (Exception ignore) { }
+  }
+  
+  // Get subdomains from common sources
+  private void getSubdomains(String urlType, String srcUrl) {
+    // Create a client to check the source URL for domains
+    HttpGet reqSubdomain = new HttpGet(srcUrl);
+    HttpClient subdomainClient = HttpClientBuilder.create().build();
+      
+    // Connect to the site to get subdomains
+    try {
+      HttpResponse resp = subdomainClient.execute(reqSubdomain);
+      String headers = resp.getStatusLine().toString();
+      printOut.println("Building a request to: " + srcUrl);
+
+      // If the status is 200, then hopefully we got JSON or plaintext response with subdomains
+      if (headers.contains("200 OK")) {
+          
+        // Read the response and get the JSON
+        BufferedReader rd = new BufferedReader(new InputStreamReader(resp.getEntity().getContent()));
+        
+        // Perform lookiup on crt.sh
+        if (urlType.contains("crt.sh")) {
+          String jsonStr = "";
+          String line = "";
+          while ((line = rd.readLine()) != null) {
+            jsonStr = jsonStr + line;
+          }
+
+          // Read JSON results
+          JSONArray subdomainObjs = new JSONArray(jsonStr);
+          
+          // Loop through our list to build create unique objects
+          for (int i = 0; i < subdomainObjs.length(); i++) {
+            JSONObject obj = subdomainObjs.getJSONObject(i);
+            BufferedReader subdomainBuffer = new BufferedReader(new StringReader(obj.getString("name_value")));
+            String subdomainLine = "";
+            
+            // Loop through each line in the result
+            while((subdomainLine = subdomainBuffer.readLine()) != null) {
+                
+              // Add to subdomain list if unique
+              if (!subdomainList.contains(subdomainLine) && !subdomainLine.equals(domainname) && !subdomainLine.contains("*")) {
+                subdomainList.add(subdomainLine);
+              }
+            }
+          }
+          
+        // Perform lookup on BufferOver
+        } else if (urlType.contains("BufferOver")) {
+          String jsonStr = "";
+          String line = "";
+          while ((line = rd.readLine()) != null) {
+            jsonStr = jsonStr + line;
+          }
+
+          // Read JSON results
+          JSONObject json = new JSONObject(jsonStr);
+          JSONArray subdomainAObjs = json.getJSONArray("FDNS_A");
+          JSONArray subdomainRObjs = json.getJSONArray("RDNS");
+          
+          // Loop through our list to build create unique objects
+          for (int i = 0; i < subdomainAObjs.length(); i++) {
+              
+            // Add to subdomain list if unique
+            if (!subdomainList.contains(subdomainAObjs.get(i).toString().split(",")[1]) && 
+                    !subdomainAObjs.get(i).toString().split(",")[1].equals(domainname) && 
+                    !subdomainAObjs.get(i).toString().split(",")[1].contains("*")) {
+              subdomainList.add(subdomainAObjs.get(i).toString().split(",")[1]);
+            }
+          }
+          
+          // Loop through our list to build create unique objects
+          for (int i = 0; i < subdomainRObjs.length(); i++) {
+              
+            // Add to subdomain list if unique
+            if (!subdomainList.contains(subdomainRObjs.get(i).toString().split(",")[1]) && 
+                    !subdomainRObjs.get(i).toString().split(",")[1].equals(domainname) && 
+                    !subdomainRObjs.get(i).toString().split(",")[1].contains("*")) {
+              subdomainList.add(subdomainRObjs.get(i).toString().split(",")[1]);
+            }
+          }
+          
+        // Perform lookup on Wayback Machine
+        } else if (urlType.contains("WaybackMachine")) {
+          String jsonStr = "";
+          String line = "";
+          int lineCount = 0;
+          
+          // Loop through each line of output, skip the first line
+          while ((line = rd.readLine()) != null) {
+            if (lineCount == 0) {
+              lineCount++;
+            } else {
+                
+              // Pull out subdomain
+              String subdomainUrl = line.split(",")[3].split("/")[2].split(":")[0];
+              
+              // Add to subdomain list if unique
+              if (!subdomainList.contains(subdomainUrl) && !subdomainUrl.equals(domainname) && !subdomainUrl.contains("*")) {
+                subdomainList.add(subdomainUrl);
+              }
+            }
+          }
+          
+        // Perform lookup on Hacker Target
+        } else if (urlType.contains("HackerTarget")) {
+          String jsonStr = "";
+          String line = "";
+          
+          // Loop through each line of output
+          while ((line = rd.readLine()) != null) {
+
+            // Pull out subdomain
+            String subdomainUrl = line.split(",")[0];
+              
+            // Add to subdomain list if unique
+            if (!subdomainList.contains(subdomainUrl) && !subdomainUrl.equals(domainname) && !subdomainUrl.contains("*") && !subdomainUrl.contains("error check")) {
+              subdomainList.add(subdomainUrl);
+            }
+          }
+          
+        // Perform lookup on Shodan
+        } else if (urlType.contains("Shodan")) {
+          String jsonStr = "";
+          String line = "";
+          
+          while ((line = rd.readLine()) != null) {
+            jsonStr = jsonStr + line;
+          }
+
+          // Read JSON results
+          JSONObject json = new JSONObject(jsonStr);
+          JSONArray subdomainObjs = json.getJSONArray("subdomains");
+          
+          // Loop through our list to build create unique objects
+          for (int i = 0; i < subdomainObjs.length(); i++) {
+              
+            // Add to subdomain list if unique
+            if (!subdomainList.contains(subdomainObjs.get(i).toString()) && 
+                    !subdomainObjs.get(i).toString().equals(domainname) && 
+                    !subdomainObjs.get(i).toString().contains("*")) {
+              subdomainList.add(subdomainObjs.get(i).toString() + "." + domainname);
+            }
+          }
+        }
+      }
+    } catch (Exception ignore) { }
+  }
+  
+  // Return the CNAME status
+  private Boolean checkDns(String domain, Pattern cnamePattern) {
+    Boolean cnameValid = false;
+    
+    // Perform the lookup to get CNAMEs
+    try {
+      Properties env = new Properties();
+      env.put(Context.INITIAL_CONTEXT_FACTORY, "com.sun.jndi.dns.DnsContextFactory");
+      env.put(Context.PROVIDER_URL, "dns://1.1.1.1");
+      InitialDirContext idc = new InitialDirContext(env);
+      javax.naming.directory.Attributes attrs = idc.getAttributes(domain, new String[]{"CNAME"});
+      javax.naming.directory.Attribute attr = attrs.get("CNAME");
+      
+      Matcher cnameMatcher = cnamePattern.matcher(attr.get().toString());
+      
+      // if the cname part matches, then likely vulnerable
+      if (cnameMatcher.find()) {
+        cnameValid = true;
+      }
+    } catch (Exception ignore) { }
+    
+    return cnameValid;
+  }
+  
+  // Return the CNAME value
+  private String checkDnsOnly(String domain) {
+    String cnameValue = "";
+    
+    // Perform the lookup to get CNAMEs
+    try {
+      Properties env = new Properties();
+      env.put(Context.INITIAL_CONTEXT_FACTORY, "com.sun.jndi.dns.DnsContextFactory");
+      env.put(Context.PROVIDER_URL, "dns://1.1.1.1");
+      InitialDirContext idc = new InitialDirContext(env);
+      javax.naming.directory.Attributes attrs = idc.getAttributes(domain, new String[]{"CNAME"});
+      javax.naming.directory.Attribute attr = attrs.get("CNAME");
+      cnameValue = attr.get().toString();
+    } catch (Exception ignore) { }
+    
+    return cnameValue;
+  }
+  
+  // Get subdomains from common sources
+  private void scanSubdomains() {
+      
+    // Create patterns for matching reponses indicating subdomain takeover potential
+    Pattern s3Pattern = Pattern.compile("(NoSuchBucket)", Pattern.CASE_INSENSITIVE );
+    Pattern s3CnamePattern = Pattern.compile("(\\.s3\\.amazonaws\\.com)", Pattern.CASE_INSENSITIVE );
+    Pattern herokuPattern = Pattern.compile("(herokucdn\\.com\\/error-pages\\/no-such-app\\.html)", Pattern.CASE_INSENSITIVE );
+    Pattern herokuCnamePattern = Pattern.compile("(\\.herokuapp\\.com|\\.herokudns\\.com|\\.herokussl\\.com)", Pattern.CASE_INSENSITIVE );
+    Pattern githubIoPattern = Pattern.compile("(There isn't a GitHub Pages site here\\.)", Pattern.CASE_INSENSITIVE );
+    Pattern githubCnamePattern = Pattern.compile("(\\.github\\.io)", Pattern.CASE_INSENSITIVE );
+
+    // Loop through the list of subdomains to test
+    for (int i = 0; i < subdomainList.size(); i++) {
+      Boolean subdomainSuccess = false;
+       
+      // Create a client to check for subdomain takeover
+      HttpGet reqSubdomainHttp = new HttpGet("http://" + subdomainList.get(i));
+      HttpClient subdomainClientHttp = HttpClientBuilder.create().build();
+      
+      // Connect to the site via http to get response for potential subdomain takeover
+      try {
+        HttpResponse resp = subdomainClientHttp.execute(reqSubdomainHttp);
+        String headers = resp.getStatusLine().toString();
+        
+        // If the status is 404, then it might be vulnerable
+        if (headers.contains("404 Not Found")) {
+          String respStr = EntityUtils.toString(resp.getEntity());
+          Matcher s3Matcher = s3Pattern.matcher(respStr);
+          Matcher herokuMatcher = herokuPattern.matcher(respStr);
+          Matcher githubIoMatcher = githubIoPattern.matcher(respStr);
+          
+          // If there is a match for the s3 pattern then it is probably vulnerable
+          if (s3Matcher.find()) {
+
+            // Validate CNAME
+            if (checkDns(subdomainList.get(i).toString(), s3CnamePattern)) {
+              printOut.println("Potential subdomain takeover of an S3 bucket found for: http://" + subdomainList.get(i));
+              URL subdomainUrl = new URL("http://" + subdomainList.get(i));
+              
+              // Create an issue from the finding
+              List<int[]> s3SubdomainMatches = getMatches(messageInfo.getResponse(), s3Matcher.group(0).getBytes());
+              IScanIssue subdomainS3IdIssue = new CustomScanIssue(
+                messageInfo.getHttpService(),
+                subdomainUrl, 
+                new IHttpRequestResponse[] { extCallbacks.applyMarkers(messageInfo, null, s3SubdomainMatches) },
+                "[Anonymous Cloud] Subdomain Takeover - " + subdomainList.get(i),
+                "The response for the following subdomain returned 'NoSuchDomain', indicating vulnerability to subdomain takeover via s3 bucket.<BR>See: also: https://github.com/EdOverflow/can-i-take-over-xyz.",
+                "High",
+                "Firm"
+              );
+              
+              // Add the S3 subdomain takeover issue
+              extCallbacks.addScanIssue(subdomainS3IdIssue);
+              subdomainSuccess = true;
+            }
+          }
+
+          // If there is a match for the Heroku pattern then it is probably vulnerable
+          if (herokuMatcher.find()) {
+
+            // Validate CNAME
+            if (checkDns(subdomainList.get(i).toString(), herokuCnamePattern)) {
+              printOut.println("Potential subdomain takeover of a Heroku app found for: http://" + subdomainList.get(i));
+              URL subdomainUrl = new URL("http://" + subdomainList.get(i));
+             
+              // Create an issue from the finding
+              List<int[]> herokuSubdomainMatches = getMatches(messageInfo.getResponse(), herokuMatcher.group(0).getBytes());
+              IScanIssue subdomainHerokuIdIssue = new CustomScanIssue(
+                messageInfo.getHttpService(),
+                subdomainUrl, 
+                new IHttpRequestResponse[] { extCallbacks.applyMarkers(messageInfo, null, herokuSubdomainMatches) },
+                "[Anonymous Cloud] Subdomain Takeover - " + subdomainList.get(i),
+                "The response for the following subdomain returned 'herokucdn.com/error-pages/no-such-app.html', indicating vulnerability to subdomain takeover via Heroku app.<BR>See: also: https://github.com/EdOverflow/can-i-take-over-xyz.",
+                "High",
+                "Firm"
+              );
+              
+              // Add the Heroku subdomain takeover issue
+              extCallbacks.addScanIssue(subdomainHerokuIdIssue);
+              subdomainSuccess = true;
+            }
+          }
+            
+          // If there is a match for the Github.io pattern then it is probably vulnerable
+          if (githubIoMatcher.find()) {
+
+            // Validate CNAME
+            if (checkDns(subdomainList.get(i).toString(), githubCnamePattern)) {
+              printOut.println("Potential subdomain takeover of a Github.io pages result for: http://" + subdomainList.get(i));
+              URL subdomainUrl = new URL("http://" + subdomainList.get(i));
+              
+              // Create an issue from the finding
+              List<int[]> githubIoSubdomainMatches = getMatches(messageInfo.getResponse(), githubIoMatcher.group(0).getBytes());
+              IScanIssue subdomainGithubIoIdIssue = new CustomScanIssue(
+                messageInfo.getHttpService(),
+                subdomainUrl, 
+                new IHttpRequestResponse[] { extCallbacks.applyMarkers(messageInfo, null, githubIoSubdomainMatches) },
+                "[Anonymous Cloud] Subdomain Takeover - " + subdomainList.get(i),
+                "The response for the following subdomain returned 'There isn't a GitHub Pages site here.', indicating vulnerability to subdomain takeover via Github.io pages.<BR>See: also: https://github.com/EdOverflow/can-i-take-over-xyz.",
+                "High",
+                "Firm"
+              );
+              
+              // Add the Heroku subdomain takeover issue
+              extCallbacks.addScanIssue(subdomainGithubIoIdIssue);
+              subdomainSuccess = true;
+            }
+          }
+        }
+      } catch (Exception ignore) { }
+       
+      // Try again with https if we didn't already find something
+      if (!subdomainSuccess) {
+        // Create an http client to check for subdomain takeover
+        HttpGet reqSubdomainHttps = new HttpGet("https://" + subdomainList.get(i));
+        HttpClient subdomainClientHttps = HttpClientBuilder.create().build();
+      
+        // Connect to the site via https to get response for potential subdomain takeover
+        try {
+          HttpResponse resp = subdomainClientHttps.execute(reqSubdomainHttps);
+          String headers = resp.getStatusLine().toString();
+
+          // If the status is 200, then hopefully we got JSON or plaintext response with subdomains
+          if (headers.contains("404 Not Found")) {
+            String respStr = EntityUtils.toString(resp.getEntity());
+            Matcher s3Matcher = s3Pattern.matcher(respStr);
+            Matcher herokuMatcher = herokuPattern.matcher(respStr);
+            Matcher githubIoMatcher = githubIoPattern.matcher(respStr);
+              
+            // If there is a match for the s3 pattern then it is probably vulnerable
+            if (s3Matcher.find()) {
+                
+              // Validate CNAME
+              if (checkDns(subdomainList.get(i).toString(), s3CnamePattern)) {
+                printOut.println("Potential subdomain takeover of an S3 bucket found for: https://" + subdomainList.get(i));
+                URL subdomainUrl = new URL("https://" + subdomainList.get(i));
+              
+                // Create an issue from the finding
+                List<int[]> s3SubdomainMatches = getMatches(messageInfo.getResponse(), s3Matcher.group(0).getBytes());
+                IScanIssue subdomainS3IdIssue = new CustomScanIssue(
+                  messageInfo.getHttpService(),
+                  subdomainUrl, 
+                  new IHttpRequestResponse[] { extCallbacks.applyMarkers(messageInfo, null, s3SubdomainMatches) },
+                  "[Anonymous Cloud] Subdomain Takeover - " + subdomainList.get(i),
+                  "The response for the following subdomain returned 'NoSuchDomain', indicating vulnerability to subdomain takeover via s3 bucket.<BR>See: also: https://github.com/EdOverflow/can-i-take-over-xyz.",
+                  "High",
+                  "Firm"
+                );
+              
+                // Add the S3 subdomain takeover issue
+                extCallbacks.addScanIssue(subdomainS3IdIssue);
+                subdomainSuccess = true;
+              }
+            }
+             
+            // If there is a match for the Heroku pattern then it is probably vulnerable
+            if (herokuMatcher.find()) {
+              
+              // Validate CNAME
+              if (checkDns(subdomainList.get(i).toString(), herokuCnamePattern)) {
+                printOut.println("Potential subdomain takeover of a Heroku app found for: https://" + subdomainList.get(i));
+                URL subdomainUrl = new URL("https://" + subdomainList.get(i));
+            
+                // Create an issue from the finding
+                List<int[]> herokuSubdomainMatches = getMatches(messageInfo.getResponse(), herokuMatcher.group(0).getBytes());
+                IScanIssue subdomainHerokuIdIssue = new CustomScanIssue(
+                  messageInfo.getHttpService(),
+                  subdomainUrl, 
+                  new IHttpRequestResponse[] { extCallbacks.applyMarkers(messageInfo, null, herokuSubdomainMatches) },
+                  "[Anonymous Cloud] Subdomain Takeover - " + subdomainList.get(i),
+                  "The response for the following subdomain returned 'herokucdn.com/error-pages/no-such-app.html', indicating vulnerability to subdomain takeover via Heroku app.<BR>See: also: https://github.com/EdOverflow/can-i-take-over-xyz.",
+                  "High",
+                  "Firm"
+                );
+              
+                // Add the Heroku subdomain takeover issue
+                extCallbacks.addScanIssue(subdomainHerokuIdIssue);
+                subdomainSuccess = true;
+              }
+            }
+             
+            // If there is a match for the Github.io pattern then it is probably vulnerable
+            if (githubIoMatcher.find()) {
+
+              // Validate CNAME
+              if (checkDns(subdomainList.get(i).toString(), githubCnamePattern)) {
+                printOut.println("Potential subdomain takeover of a Github.io pages result for: https://" + subdomainList.get(i));
+                URL subdomainUrl = new URL("https://" + subdomainList.get(i));
+            
+                // Create an issue from the finding
+                List<int[]> githubIoSubdomainMatches = getMatches(messageInfo.getResponse(), githubIoMatcher.group(0).getBytes());
+                IScanIssue subdomainGithubIoIdIssue = new CustomScanIssue(
+                  messageInfo.getHttpService(),
+                  subdomainUrl, 
+                  new IHttpRequestResponse[] { extCallbacks.applyMarkers(messageInfo, null, githubIoSubdomainMatches) },
+                  "[Anonymous Cloud] Subdomain Takeover - " + subdomainList.get(i),
+                  "The response for the following subdomain returned 'There isn't a GitHub Pages site here.', indicating vulnerability to subdomain takeover via Github.io pages.<BR>See: also: https://github.com/EdOverflow/can-i-take-over-xyz.",
+                  "High",
+                  "Firm"
+                );
+              
+                // Add the Github Pages subdomain takeover issue
+                extCallbacks.addScanIssue(subdomainGithubIoIdIssue);
+                subdomainSuccess = true;
+              }
+            }
+          }
+        } catch (Exception ignore) {}
+      }
+    }
+  }
+  
+  // Get subdomains from common sources
+  private void scanDnsSubdomains() {
+      
+    // Create patterns for Azure resources
+    Pattern[] azurePatterns = {
+      Pattern.compile("(\\.cloudapp\\.net)", Pattern.CASE_INSENSITIVE ),
+      Pattern.compile("(\\.cloudapp\\.azure\\.com)", Pattern.CASE_INSENSITIVE ),
+      Pattern.compile("(\\.azurewebsites\\.com)", Pattern.CASE_INSENSITIVE ),
+      Pattern.compile("(\\.blob\\.core\\.windows\\.net)", Pattern.CASE_INSENSITIVE ),
+      Pattern.compile("(\\.azure-api\\.com)", Pattern.CASE_INSENSITIVE ),
+      Pattern.compile("(\\.azurecontainer\\.io)", Pattern.CASE_INSENSITIVE ),
+      Pattern.compile("(\\.database\\.windows\\.net)", Pattern.CASE_INSENSITIVE ),
+      Pattern.compile("(\\.azuredatalakestore\\.net)", Pattern.CASE_INSENSITIVE ),
+      Pattern.compile("(\\.search\\.windows\\.net)", Pattern.CASE_INSENSITIVE ),
+      Pattern.compile("(\\.redis\\.cache\\.windows\\.net)", Pattern.CASE_INSENSITIVE )
+    };
+    
+    // Create strings of Azure resources
+    String[] azureDomains = {
+      ".cloudapp.net",
+      ".cloudapp.azure.com",
+      ".azurewebsites.com",
+      ".blob.core.windows.net",
+      ".azure-api.com",
+      ".azurecontainer.io",
+      ".database.windows.net",
+      ".azuredatalakestore.net",
+      ".search.windows.net",
+      ".redis.cache.windows.net"
+    };
+
+    // Loop through the list of subdomains to test
+    for (int i = 0; i < subdomainList.size(); i++) {
+        
+      // Get cname result
+      String cnameResult = checkDnsOnly(subdomainList.get(i).toString());
+
+      // Loop through patterns if anything was returned
+      if (cnameResult.length() > 10) {
+        for (int j = 0; j < azurePatterns.length; j++) {
+          Matcher azureMatcher = azurePatterns[j].matcher(cnameResult);
+          
+          // Check against the pattern
+          if (azureMatcher.find()) {
+              
+            // Create an http client to check for subdomain takeover
+            String azureDomain = subdomainList.get(i).toString().split("\\.")[0];
+            String[] testing = subdomainList.get(i).toString().split("\\.");
+            HttpGet reqSubdomainHttp = new HttpGet("http://" + azureDomain + azureDomains[j]);
+            HttpClient subdomainClientHttp = HttpClientBuilder.create().build();
+            Boolean isNotResponding = true;
+      
+            // Connect to the site via https to get response for potential subdomain takeover
+            try {
+              HttpResponse resp = subdomainClientHttp.execute(reqSubdomainHttp);
+              String headers = resp.getStatusLine().toString();
+              isNotResponding = false;
+            } catch (Exception ignore) { }
+            
+            // If CNAME result points to Azure resource but website does not respond, potentially vulnerable
+            if (isNotResponding) {
+              try {
+                printOut.println("Potential subdomain takeover of an Azure for: https://" + subdomainList.get(i));
+                // Create an issue from the finding
+                URL subdomainUrl = new URL("https://" + subdomainList.get(i));
+                List<int[]> azureSubdomainMatches = getMatches(messageInfo.getResponse(), azureMatcher.group(0).getBytes());
+                IScanIssue subdomainAzureIdIssue = new CustomScanIssue(
+                  messageInfo.getHttpService(),
+                  subdomainUrl, 
+                  new IHttpRequestResponse[] { extCallbacks.applyMarkers(messageInfo, null, azureSubdomainMatches) },
+                  "[Anonymous Cloud] Subdomain Takeover - " + subdomainList.get(i),
+                  "A CNAME points to an Azure resource that does not respond the a web request, indicating vulnerability to subdomain takeover for: " + azureDomain + azureDomains[j] + "<BR>See: also: https://github.com/EdOverflow/can-i-take-over-xyz.",
+                  "High",
+                  "Firm"
+                );
+              
+                // Add the Azure subdomain takeover issue
+                extCallbacks.addScanIssue(subdomainAzureIdIssue);
+              } catch (Exception ignore) { }
+            }
+          }
+        }
+      }
+    }
+  }
+    
+  @Override
+  public void run() {
+      
+    printOut.println("Beginning subdomain scanning, gathering subdomain lists.");
+    // Get subdomains from a file if one was provided
+    if (isFileListSet) {
+      getListSubdomains();
+    }
+      
+    // Get subdomains from open sources
+    getSubdomains("crt.sh", certTransUrl + domainname);
+    getSubdomains("BufferOver", bufferOverUrl + domainname);
+    getSubdomains("WaybackMachine", waybackMachineUrl + domainname);
+    getSubdomains("HackerTarget", hackerTargetUrl + domainname);
+    
+    // if a Shodan API key was provided, get subdomains
+    if (isShodanSet) {
+      getSubdomains("Shodan", shodanUrl);
+    }
+    
+    // if a Censys API key was provided, get subdomains
+    if (isCensysSet) {
+      getCensysSubdomains("Censys", censysUrl);
+    }
+    
+    // Begin scan based on HTTP
+    printOut.println("Beginning HTTP/HTTPS subdomain scanning for AWS S3/Heroku/Github.");
+    scanSubdomains();
+    
+    // Begin scan based on DNS
+    printOut.println("Beginning DNS subdomain scanning for Azure.");
+    scanDnsSubdomains();
+    
+    printOut.println("Subdomain scanning has completed.");
+  }
+  
+  @Override
+  public void registerExtenderCallbacks(IBurpExtenderCallbacks callbacks) {
+    throw new UnsupportedOperationException("Not supported yet."); 
+  }
+}
 
 public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
 
   // Setup extension wide variables
   public IBurpExtenderCallbacks extCallbacks;
   public IExtensionHelpers extHelpers;
-  private static final String burpAnonCloudVersion = "0.1.7";
+  private static final String burpAnonCloudVersion = "0.1.8";
   private static final Pattern S3BucketPattern = Pattern.compile("((?:\\w+://)?(?:([\\w.-]+)\\.s3[\\w.-]*\\.amazonaws\\.com|s3(?:[\\w.-]*\\.amazonaws\\.com(?:(?::\\d+)?\\\\?/)*|://)([\\w.-]+))(?:(?::\\d+)?\\\\?/)?(?:.*?\\?.*Expires=(\\d+))?)", Pattern.CASE_INSENSITIVE);
   private static final Pattern GoogleBucketPattern = Pattern.compile("((?:\\w+://)?(?:([\\w.-]+)\\.storage[\\w-]*\\.googleapis\\.com|(?:(?:console\\.cloud\\.google\\.com/storage/browser/|storage\\.cloud\\.google\\.com|storage[\\w-]*\\.googleapis\\.com)(?:(?::\\d+)?\\\\?/)*|gs://)([\\w.-]+))(?:(?::\\d+)?\\\\?/([^\\s?'\"#]*))?(?:.*\\?.*Expires=(\\d+))?)", Pattern.CASE_INSENSITIVE);
   private static final Pattern GcpFirebase = Pattern.compile("([\\w.-]+\\.firebaseio\\.com/)", Pattern.CASE_INSENSITIVE );
@@ -77,10 +762,18 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
   private String awsAccessKey = "";
   private String awsSecretAccessKey = "";
   private String googleBearerToken = "";
+  private String shodanApiKey = "";
+  private String censysApiKey = "";
+  private String censysApiSecret = "";
   private static final String GoogleValidationUrl = "https://storage.googleapis.com/storage/v1/b/";
   private static final String GoogleBucketUploadUrl = "https://storage.googleapis.com/upload/storage/v1/b/";
   private Boolean isAwsAuthSet = false;
   private Boolean isGoogleAuthSet = false;
+  private Boolean isShodanApiSet = false;
+  private Boolean isCensysApiSet = false;
+  private Boolean isSubdomainTakeoverSet = false;
+  private ArrayList SubdomainThreads = new ArrayList();
+  private File subdomainFileList;
   AWSCredentials anonCredentials = new AnonymousAWSCredentials();
   AWSCredentials authCredentials;
   AmazonS3 anonS3client = AmazonS3ClientBuilder
@@ -109,9 +802,24 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
     JLabel anonCloudAwsSecretKeyDescLabel = new JLabel();
     JLabel anonCloudGoogleBearerLabel = new JLabel();
     JLabel anonCloudGoogleBearerDescLabel = new JLabel();
+    JLabel anonCloudSubdomainTakeoverLabel = new JLabel();
+    JLabel anonCloudSubdomainTakeoverDescLabel = new JLabel();
+    JLabel anonCloudSubdomainShodanLabel = new JLabel();
+    JLabel anonCloudSubdomainShodanDescLabel = new JLabel();
+    JLabel anonCloudSubdomainCensysLabel = new JLabel();
+    JLabel anonCloudSubdomainCensysDescLabel = new JLabel();
+    JLabel anonCloudSubdomainCensysSecretLabel = new JLabel();
+    JLabel anonCloudSubdomainCensysSecretDescLabel = new JLabel();
+    JLabel anonCloudSubdomainTakeoverListLabel = new JLabel();
+    JLabel anonCloudSubdomainTakeoverListDescLabel = new JLabel();
+    final JCheckBox anonCloudSubdomainTakeoverCheck = new JCheckBox();
     final JTextField anonCloudAwsKeyText = new JTextField();
     final JTextField anonCloudAwsSecretKeyText = new JTextField();
     final JTextField anonCloudGoogleBearerText = new JTextField();
+    final JTextField anonCloudSubdomainShodanText = new JTextField();
+    final JTextField anonCloudSubdomainCensysText = new JTextField();
+    final JTextField anonCloudSubdomainCensysSecretText = new JTextField();
+    final JButton anonCloudSubdomainTakeoverListButton = new JButton("Subdomain List");
     JButton anonCloudSetHeaderBtn = new JButton("Set Configuration");
     JLabel anonCloudSetHeaderDescLabel = new JLabel();
     
@@ -119,35 +827,98 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
     // AWS Access Key GUI
     anonCloudAwsKeyLabel.setText("AWS Access Key:");
     anonCloudAwsKeyDescLabel.setText("Any AWS authenticated user test: AWS Access Key.");
-    anonCloudAwsKeyLabel.setBounds(16, 15, 125, 20);
-    anonCloudAwsKeyText.setBounds(146, 12, 310, 26);
+    anonCloudAwsKeyLabel.setBounds(16, 15, 145, 20);
+    anonCloudAwsKeyText.setBounds(166, 12, 310, 26);
     anonCloudAwsKeyDescLabel.setBounds(606, 15, 600, 20);
     
     // AWS Secret Access Key GUI
     anonCloudAwsSecretKeyLabel.setText("AWS Secret Access Key:");
     anonCloudAwsSecretKeyDescLabel.setText("Any AWS authenticated user test: AWS Secret Access Key.");
-    anonCloudAwsSecretKeyLabel.setBounds(16, 50, 125, 20);
-    anonCloudAwsSecretKeyText.setBounds(146, 47, 310, 26);
+    anonCloudAwsSecretKeyLabel.setBounds(16, 50, 145, 20);
+    anonCloudAwsSecretKeyText.setBounds(166, 47, 310, 26);
     anonCloudAwsSecretKeyDescLabel.setBounds(606, 50, 600, 20);
     
     // Set values for labels, panels, locations, for Google stuff
     // Google Bearer Token
     anonCloudGoogleBearerLabel.setText("Google Bearer Token:");
     anonCloudGoogleBearerDescLabel.setText("Any Google authenticated user test: Google Bearer Token (use 'gcloud auth print-access-token')");
-    anonCloudGoogleBearerLabel.setBounds(16, 85, 125, 20);
-    anonCloudGoogleBearerText.setBounds(146, 82, 310, 26);
+    anonCloudGoogleBearerLabel.setBounds(16, 85, 145, 20);
+    anonCloudGoogleBearerText.setBounds(166, 82, 310, 26);
     anonCloudGoogleBearerDescLabel.setBounds(606, 85, 600, 20);
+    
+    // Set values for labels, panels, locations, for Shodan stuff
+    // Shodan API key
+    anonCloudSubdomainShodanLabel.setText("Shodan API Key:");
+    anonCloudSubdomainShodanDescLabel.setText("Shodan API key for use with subdomain takeover testing.");
+    anonCloudSubdomainShodanLabel.setBounds(16, 120, 145, 20);
+    anonCloudSubdomainShodanText.setBounds(166, 117, 310, 26);
+    anonCloudSubdomainShodanDescLabel.setBounds(606, 120, 600, 20);
+    
+    // Set values for labels, panels, locations, for Censys.io stuff
+    // Censys API key
+    anonCloudSubdomainCensysLabel.setText("Censys API Key:");
+    anonCloudSubdomainCensysDescLabel.setText("Censys API key for use with subdomain takeover testing.");
+    anonCloudSubdomainCensysLabel.setBounds(16, 155, 145, 20);
+    anonCloudSubdomainCensysText.setBounds(166, 152, 310, 26);
+    anonCloudSubdomainCensysDescLabel.setBounds(606, 155, 600, 20);
+    
+    // Set values for labels, panels, locations, for Censys.io stuff
+    // Censys API Secret
+    anonCloudSubdomainCensysSecretLabel.setText("Censys API Secret:");
+    anonCloudSubdomainCensysSecretDescLabel.setText("Censys API Secret for use with subdomain takeover testing.");
+    anonCloudSubdomainCensysSecretLabel.setBounds(16, 190, 145, 20);
+    anonCloudSubdomainCensysSecretText.setBounds(166, 187, 310, 26);
+    anonCloudSubdomainCensysSecretDescLabel.setBounds(606, 190, 600, 20);
+    
+    // Checkbox for Subdomain Takeovers
+    anonCloudSubdomainTakeoverLabel.setText("Enable Subdomain Takeover:");
+    anonCloudSubdomainTakeoverDescLabel.setText("Automate discovery of subdomains that might be vulnerable to takeover.");
+    anonCloudSubdomainTakeoverLabel.setBounds(16, 225, 145, 20);
+    anonCloudSubdomainTakeoverCheck.setBounds(456, 222, 20, 26);
+    anonCloudSubdomainTakeoverDescLabel.setBounds(606, 225, 600, 20);
+    
+    // Checkbox for Subdomain Takeovers
+    anonCloudSubdomainTakeoverListLabel.setText("Subdomain List:");
+    anonCloudSubdomainTakeoverListDescLabel.setText("File to provide subdomains (will append each item with .<domain>.com/net/org/etc).");
+    anonCloudSubdomainTakeoverListLabel.setBounds(16, 260, 145, 20);
+    anonCloudSubdomainTakeoverListButton.setBounds(166, 257, 310, 26);
+    anonCloudSubdomainTakeoverListDescLabel.setBounds(606, 260, 600, 20);
     
     // Create button for setting options
     anonCloudSetHeaderDescLabel.setText("Enable access configuration.");
-    anonCloudSetHeaderDescLabel.setBounds(606, 120, 600, 20);
-    anonCloudSetHeaderBtn.setBounds(146, 120, 310, 26);
+    anonCloudSetHeaderDescLabel.setBounds(606, 295, 600, 20);
+    anonCloudSetHeaderBtn.setBounds(166, 295, 310, 26);
     
+    // Process and set subdomain file list
+    anonCloudSubdomainTakeoverListButton.addActionListener(new ActionListener() {
+      public void actionPerformed(ActionEvent e) {
+          
+        // Select the file
+        JFileChooser selectFile = new JFileChooser();
+        FileNameExtensionFilter filter = new FileNameExtensionFilter("Text files only", "txt");
+        selectFile.setFileFilter(filter);
+        int returnFile = selectFile.showDialog(anonCloudPanel, "Subdomain List");
+        
+        // If a file was chosen, process it
+        if (returnFile == JFileChooser.APPROVE_OPTION) {
+          File subdomainFile = selectFile.getSelectedFile();
+          
+          if (subdomainFile.length() > 0) {
+            subdomainFileList = subdomainFile;
+          }
+        }
+      }
+    });
+    
+    // Process and set configuration options
     anonCloudSetHeaderBtn.addActionListener(new ActionListener() {
       public void actionPerformed(ActionEvent e) {
         awsAccessKey = anonCloudAwsKeyText.getText();
         awsSecretAccessKey = anonCloudAwsSecretKeyText.getText();
         googleBearerToken = anonCloudGoogleBearerText.getText();
+        shodanApiKey = anonCloudSubdomainShodanText.getText();
+        censysApiKey = anonCloudSubdomainCensysText.getText();
+        censysApiSecret = anonCloudSubdomainCensysSecretText.getText();
         
         // If valid AWS keys were entered, setup a client
         if (awsAccessKey.matches("^(AIza[0-9A-Za-z-_]{35}|A3T[A-Z0-9]|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|AGPA[A-Z0-9]{16}|AIDA[A-Z0-9]{16}|AROA[A-Z0-9]{16}|AIPA[A-Z0-9]{16}|ANPA[A-Z0-9]{16}|ANVA[A-Z0-9]{16})") && awsSecretAccessKey.length() == 40) {
@@ -164,8 +935,24 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
           isAwsAuthSet = true;
         }
         
+        // Add Google Bearer Token if set
         if (googleBearerToken.matches("^ya29\\.[0-9A-Za-z\\-_]+")) {
           isGoogleAuthSet = true;
+        }
+        
+        // Add Shodan API key if set
+        if (shodanApiKey.matches("^[a-zA-Z0-9]+")) {
+          isShodanApiSet = true;
+        }
+        
+        // Add Censys API key if set
+        if (censysApiKey.matches("^[a-zA-Z0-9\\-]+") && censysApiSecret.matches("^[a-zA-Z0-9]+")) {
+          isCensysApiSet = true;
+        }
+            
+        // Check for Subdomain Takeover being enabled
+        if (anonCloudSubdomainTakeoverCheck.isSelected()){
+          isSubdomainTakeoverSet = true;
         }
       }
     });
@@ -180,6 +967,21 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
     anonCloudPanel.add(anonCloudGoogleBearerLabel);
     anonCloudPanel.add(anonCloudGoogleBearerDescLabel);
     anonCloudPanel.add(anonCloudGoogleBearerText);
+    anonCloudPanel.add(anonCloudSubdomainTakeoverLabel);
+    anonCloudPanel.add(anonCloudSubdomainTakeoverDescLabel);
+    anonCloudPanel.add(anonCloudSubdomainTakeoverCheck);
+    anonCloudPanel.add(anonCloudSubdomainShodanLabel);
+    anonCloudPanel.add(anonCloudSubdomainShodanDescLabel);
+    anonCloudPanel.add(anonCloudSubdomainShodanText);
+    anonCloudPanel.add(anonCloudSubdomainCensysLabel);
+    anonCloudPanel.add(anonCloudSubdomainCensysDescLabel);
+    anonCloudPanel.add(anonCloudSubdomainCensysText);
+    anonCloudPanel.add(anonCloudSubdomainCensysSecretLabel);
+    anonCloudPanel.add(anonCloudSubdomainCensysSecretDescLabel);
+    anonCloudPanel.add(anonCloudSubdomainCensysSecretText);
+    anonCloudPanel.add(anonCloudSubdomainTakeoverListLabel);
+    anonCloudPanel.add(anonCloudSubdomainTakeoverListDescLabel);
+    anonCloudPanel.add(anonCloudSubdomainTakeoverListButton);
     anonCloudPanel.add(anonCloudSetHeaderBtn);
     anonCloudPanel.add(anonCloudSetHeaderDescLabel);
     
@@ -211,6 +1013,40 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
 
     // Only process requests if the URL is in scope
     if (extCallbacks.isInScope(extHelpers.analyzeRequest(messageInfo).getUrl())) {
+        
+      // Start thread for subdomain takeovers
+      if (isSubdomainTakeoverSet) {
+        String fqdn = extHelpers.analyzeRequest(messageInfo).getUrl().getHost();
+        String[] strUrl = fqdn.split("\\.");
+        
+        // If a thread has not already been started for this FQDN, then start one, but only if wildcard DNS fails
+        if (!SubdomainThreads.contains(strUrl[strUrl.length-2] + "." + strUrl[strUrl.length-1])) {
+          SubdomainThreads.add(strUrl[strUrl.length-2] + "." + strUrl[strUrl.length-1]);
+            
+          // Perform a lookup on a non-existent DNS address first to make sure wildcard responses are not on
+          InetAddress[] firstDnsTest;
+          Boolean lookupStatus = false;
+          String wildcardTest = Base64.getEncoder().encodeToString((genRandStr()).getBytes(StandardCharsets.UTF_8)).replace("=", "").replace("/", "").replace("+", "");
+
+          // Lookup the address
+          try {
+            firstDnsTest = InetAddress.getAllByName(wildcardTest + "." + strUrl[strUrl.length-2] + "." + strUrl[strUrl.length-1]);
+
+            // If we got a response, set status to true
+            if (firstDnsTest.length > 0) {
+              lookupStatus = true;
+            }
+          } catch (Exception ignore) { }
+    
+          // If the lookup failed, wildcard responses are not on and we can proceed
+          if (!lookupStatus) {
+            String censysCredential = censysApiKey + ":" + censysApiSecret;
+            SubdomainTakeover t = new SubdomainTakeover(extCallbacks, messageInfo, strUrl[strUrl.length-2] + "." + strUrl[strUrl.length-1], printOut, shodanApiKey, censysCredential, subdomainFileList);
+            t.start();
+          }
+        }
+      }
+        
       // Setup default response body variables
       String respRaw = new String(messageInfo.getResponse());
       String respBody = respRaw.substring(extHelpers.analyzeResponse(messageInfo.getResponse()).getBodyOffset());
