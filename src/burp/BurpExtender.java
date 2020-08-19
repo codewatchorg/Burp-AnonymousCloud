@@ -1,7 +1,7 @@
 /*
  * Name:           Burp Anonymous Cloud
  * Version:        0.1.8
- * Date:           1/21/2019
+ * Date:           1/21/2020
  * Author:         Josh Berry - josh.berry@codewatch.org
  * Github:         https://github.com/codewatchorg/Burp-AnonymousCloud
  * 
