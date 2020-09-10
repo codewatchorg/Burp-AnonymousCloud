@@ -48,8 +48,8 @@ All you have to do is:
 1. Add the JAR as an extension in Burp.
 2. Add the appropriate targets to scope.
 3. Begin manually browsing and scanning the target.
-3a. If you want to test for permissions issues that allow all authenticated AWS/GCP users, then add your personal AWS/GCP credentials, and click the "Set Configuration" button.
-3b. If you want to check for potential subdomain takeover vulnerabilities, add API keys for Shodan and Censys (if you want to use both), in addition to a text file list of subdomains (if you want), check the subdomain takeover configuration box, and click the "Set Configuration" button.
+4. If you want to test for permissions issues that allow all authenticated AWS/GCP users, then add your personal AWS/GCP credentials, and click the "Set Configuration" button.
+5. If you want to check for potential subdomain takeover vulnerabilities, add API keys for Shodan and Censys (if you want to use both), in addition to a text file list of subdomains (if you want), check the subdomain takeover configuration box, and click the "Set Configuration" button.
 
 
 Future
