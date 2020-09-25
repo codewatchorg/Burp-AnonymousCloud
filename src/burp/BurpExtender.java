@@ -1,6 +1,6 @@
 /*
  * Name:           Burp Anonymous Cloud
- * Version:        0.1.8
+ * Version:        0.1.9
  * Date:           1/21/2020
  * Author:         Josh Berry - josh.berry@codewatch.org
  * Github:         https://github.com/codewatchorg/Burp-AnonymousCloud
@@ -309,9 +309,10 @@ class SubdomainTakeover implements IBurpExtender, Runnable {
                 
               // Pull out subdomain
               String subdomainUrl = line.split(",")[3].split("/")[2].split(":")[0];
+              subdomainUrl = subdomainUrl.replace("\"", "");
               
               // Add to subdomain list if unique
-              if (!subdomainList.contains(subdomainUrl) && !subdomainUrl.equals(domainname) && !subdomainUrl.contains("*")) {
+              if (!subdomainList.contains(subdomainUrl) && !subdomainUrl.equals(domainname) && !subdomainUrl.contains("*") && subdomainUrl.contains(domainname)) {
                 subdomainList.add(subdomainUrl);
               }
             }
@@ -611,7 +612,7 @@ class SubdomainTakeover implements IBurpExtender, Runnable {
               }
             }
           }
-        } catch (Exception ignore) {}
+        } catch (Exception ignore) { }
       }
     }
   }
@@ -749,7 +750,7 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
   // Setup extension wide variables
   public IBurpExtenderCallbacks extCallbacks;
   public IExtensionHelpers extHelpers;
-  private static final String burpAnonCloudVersion = "0.1.8";
+  private static final String burpAnonCloudVersion = "0.1.9";
   private static final Pattern S3BucketPattern = Pattern.compile("((?:\\w+://)?(?:([\\w.-]+)\\.s3[\\w.-]*\\.amazonaws\\.com|s3(?:[\\w.-]*\\.amazonaws\\.com(?:(?::\\d+)?\\\\?/)*|://)([\\w.-]+))(?:(?::\\d+)?\\\\?/)?(?:.*?\\?.*Expires=(\\d+))?)", Pattern.CASE_INSENSITIVE);
   private static final Pattern GoogleBucketPattern = Pattern.compile("((?:\\w+://)?(?:([\\w.-]+)\\.storage[\\w-]*\\.googleapis\\.com|(?:(?:console\\.cloud\\.google\\.com/storage/browser/|storage\\.cloud\\.google\\.com|storage[\\w-]*\\.googleapis\\.com)(?:(?::\\d+)?\\\\?/)*|gs://)([\\w.-]+))(?:(?::\\d+)?\\\\?/([^\\s?'\"#]*))?(?:.*\\?.*Expires=(\\d+))?)", Pattern.CASE_INSENSITIVE);
   private static final Pattern GcpFirebase = Pattern.compile("([\\w.-]+\\.firebaseio\\.com/)", Pattern.CASE_INSENSITIVE );
