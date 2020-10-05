@@ -1,6 +1,6 @@
 /*
  * Name:           Burp Anonymous Cloud
- * Version:        0.1.9
+ * Version:        0.1.10
  * Date:           1/21/2020
  * Author:         Josh Berry - josh.berry@codewatch.org
  * Github:         https://github.com/codewatchorg/Burp-AnonymousCloud
@@ -750,10 +750,10 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
   // Setup extension wide variables
   public IBurpExtenderCallbacks extCallbacks;
   public IExtensionHelpers extHelpers;
-  private static final String burpAnonCloudVersion = "0.1.9";
+  private static final String burpAnonCloudVersion = "0.1.10";
   private static final Pattern S3BucketPattern = Pattern.compile("((?:\\w+://)?(?:([\\w.-]+)\\.s3[\\w.-]*\\.amazonaws\\.com|s3(?:[\\w.-]*\\.amazonaws\\.com(?:(?::\\d+)?\\\\?/)*|://)([\\w.-]+))(?:(?::\\d+)?\\\\?/)?(?:.*?\\?.*Expires=(\\d+))?)", Pattern.CASE_INSENSITIVE);
   private static final Pattern GoogleBucketPattern = Pattern.compile("((?:\\w+://)?(?:([\\w.-]+)\\.storage[\\w-]*\\.googleapis\\.com|(?:(?:console\\.cloud\\.google\\.com/storage/browser/|storage\\.cloud\\.google\\.com|storage[\\w-]*\\.googleapis\\.com)(?:(?::\\d+)?\\\\?/)*|gs://)([\\w.-]+))(?:(?::\\d+)?\\\\?/([^\\s?'\"#]*))?(?:.*\\?.*Expires=(\\d+))?)", Pattern.CASE_INSENSITIVE);
-  private static final Pattern GcpFirebase = Pattern.compile("([\\w.-]+\\.firebaseio\\.com/)", Pattern.CASE_INSENSITIVE );
+  private static final Pattern GcpFirebase = Pattern.compile("([\\w.-]+\\.firebaseio\\.com)", Pattern.CASE_INSENSITIVE );
   private static final Pattern AzureBucketPattern = Pattern.compile("(([\\w.-]+\\.blob\\.core\\.windows\\.net(?::\\d+)?\\\\?/[\\w.-]+)(?:.*?\\?.*se=([\\w%-]+))?)", Pattern.CASE_INSENSITIVE);
   private static final Pattern AzureTablePattern = Pattern.compile("(([\\w.-]+\\.table\\.core\\.windows\\.net(?::\\d+)?\\\\?/[\\w.-]+)(?:.*?\\?.*se=([\\w%-]+))?)", Pattern.CASE_INSENSITIVE);
   private static final Pattern AzureQueuePattern = Pattern.compile("(([\\w.-]+\\.queue\\.core\\.windows\\.net(?::\\d+)?\\\\?/[\\w.-]+)(?:.*?\\?.*se=([\\w%-]+))?)", Pattern.CASE_INSENSITIVE);
@@ -2302,7 +2302,7 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
   private void gcpFirebaseCheck(IHttpRequestResponse messageInfo, List<int[]>matches, String firebaseDb) {
     // Create a client to check Google for the Firebase DB
     HttpClient readClient = HttpClientBuilder.create().build();
-    HttpGet readReq = new HttpGet("https://" + firebaseDb + ".json");
+    HttpGet readReq = new HttpGet("https://" + firebaseDb + "/.json");
 
     // Connect to GCP services for Firebase DB access
     try {
@@ -2341,7 +2341,7 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
     String firebaseItem = "Burp-AnonymousCloud-" + genRandStr();
     String firebaseContent = "Burp-AnonymousCloud Extension Public Write Test!";
     HttpClient writeClient = HttpClientBuilder.create().build();
-    HttpPost writeReq = new HttpPost("https://" + firebaseDb + ".json");
+    HttpPost writeReq = new HttpPost("https://" + firebaseDb + "/.json");
 
     // Connect to GCP services for Firebase DB access
     try {
