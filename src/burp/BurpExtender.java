@@ -1,6 +1,6 @@
 /*
  * Name:           Burp Anonymous Cloud
- * Version:        0.1.10
+ * Version:        0.1.11
  * Date:           1/21/2020
  * Author:         Josh Berry - josh.berry@codewatch.org
  * Github:         https://github.com/codewatchorg/Burp-AnonymousCloud
@@ -8,6 +8,8 @@
  * Description:    This plugin checks for insecure AWS/Azure/Google application configurations
  * 
  * Contains regex work from Cloud Storage Tester by VirtueSecurity: https://github.com/VirtueSecurity/aws-extender
+ * Implemented an idea from https://github.com/0xSearches/sandcastle
+ * Implemented AWS checks included in https://gist.github.com/fransr/a155e5bd7ab11c93923ec8ce788e3368
  *
 */
 
@@ -70,6 +72,10 @@ import java.io.StringReader;
 import javax.naming.directory.InitialDirContext;
 import javax.naming.Context;
 import java.util.Properties;
+import java.util.Arrays;
+import java.time.format.DateTimeFormatter;
+import java.time.ZonedDateTime;
+import java.time.ZoneOffset;
 
 class SubdomainTakeover implements IBurpExtender, Runnable {
   private Thread t;
@@ -750,7 +756,7 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
   // Setup extension wide variables
   public IBurpExtenderCallbacks extCallbacks;
   public IExtensionHelpers extHelpers;
-  private static final String burpAnonCloudVersion = "0.1.10";
+  private static final String burpAnonCloudVersion = "0.1.11";
   private static final Pattern S3BucketPattern = Pattern.compile("((?:\\w+://)?(?:([\\w.-]+)\\.s3[\\w.-]*\\.amazonaws\\.com|s3(?:[\\w.-]*\\.amazonaws\\.com(?:(?::\\d+)?\\\\?/)*|://)([\\w.-]+))(?:(?::\\d+)?\\\\?/)?(?:.*?\\?.*Expires=(\\d+))?)", Pattern.CASE_INSENSITIVE);
   private static final Pattern GoogleBucketPattern = Pattern.compile("((?:\\w+://)?(?:([\\w.-]+)\\.storage[\\w-]*\\.googleapis\\.com|(?:(?:console\\.cloud\\.google\\.com/storage/browser/|storage\\.cloud\\.google\\.com|storage[\\w-]*\\.googleapis\\.com)(?:(?::\\d+)?\\\\?/)*|gs://)([\\w.-]+))(?:(?::\\d+)?\\\\?/([^\\s?'\"#]*))?(?:.*\\?.*Expires=(\\d+))?)", Pattern.CASE_INSENSITIVE);
   private static final Pattern GcpFirebase = Pattern.compile("([\\w.-]+\\.firebaseio\\.com)", Pattern.CASE_INSENSITIVE );
@@ -773,8 +779,15 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
   private Boolean isShodanApiSet = false;
   private Boolean isCensysApiSet = false;
   private Boolean isSubdomainTakeoverSet = false;
+  private Boolean isBucketSubsSet = false;
   private ArrayList SubdomainThreads = new ArrayList();
   private File subdomainFileList;
+  private File bucketFileList;
+  private ArrayList bucketList = new ArrayList();
+  private ArrayList firebaseList = new ArrayList();
+  private ArrayList firebaseCheckList = new ArrayList();
+  private ArrayList bucketCheckList = new ArrayList();
+  private ArrayList siteOnBucketCheckList = new ArrayList();
   AWSCredentials anonCredentials = new AnonymousAWSCredentials();
   AWSCredentials authCredentials;
   AmazonS3 anonS3client = AmazonS3ClientBuilder
@@ -813,7 +826,12 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
     JLabel anonCloudSubdomainCensysSecretDescLabel = new JLabel();
     JLabel anonCloudSubdomainTakeoverListLabel = new JLabel();
     JLabel anonCloudSubdomainTakeoverListDescLabel = new JLabel();
+    JLabel anonCloudBucketSubsLabel = new JLabel();
+    JLabel anonCloudBucketSubsDescLabel = new JLabel();
     final JCheckBox anonCloudSubdomainTakeoverCheck = new JCheckBox();
+    JLabel anonCloudBucketSubsListLabel = new JLabel();
+    JLabel anonCloudBucketSubsListDescLabel = new JLabel();
+    final JCheckBox anonCloudBucketSubsCheck = new JCheckBox();
     final JTextField anonCloudAwsKeyText = new JTextField();
     final JTextField anonCloudAwsSecretKeyText = new JTextField();
     final JTextField anonCloudGoogleBearerText = new JTextField();
@@ -821,6 +839,7 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
     final JTextField anonCloudSubdomainCensysText = new JTextField();
     final JTextField anonCloudSubdomainCensysSecretText = new JTextField();
     final JButton anonCloudSubdomainTakeoverListButton = new JButton("Subdomain List");
+    final JButton anonCloudBucketSubsListButton = new JButton("Bucket List");
     JButton anonCloudSetHeaderBtn = new JButton("Set Configuration");
     JLabel anonCloudSetHeaderDescLabel = new JLabel();
     
@@ -885,10 +904,24 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
     anonCloudSubdomainTakeoverListButton.setBounds(166, 257, 310, 26);
     anonCloudSubdomainTakeoverListDescLabel.setBounds(606, 260, 600, 20);
     
+    // Checkbox for checking additional bucket names
+    anonCloudBucketSubsLabel.setText("Extra Bucket Checks:");
+    anonCloudBucketSubsDescLabel.setText("If a valid bucket/Firebase DB is found, append various common names to discover additional resources.");
+    anonCloudBucketSubsLabel.setBounds(16, 295, 145, 20);
+    anonCloudBucketSubsCheck.setBounds(456, 292, 20, 26);
+    anonCloudBucketSubsDescLabel.setBounds(606, 295, 600, 20);
+    
+    // Checkbox for checking additional bucket names
+    anonCloudBucketSubsListLabel.setText("Bucket List:");
+    anonCloudBucketSubsListDescLabel.setText("File to provide bucket/Firebase DB names to append to a valid bucket/DB.");
+    anonCloudBucketSubsListLabel.setBounds(16, 330, 145, 20);
+    anonCloudBucketSubsListButton.setBounds(166, 327, 310, 26);
+    anonCloudBucketSubsListDescLabel.setBounds(606, 330, 600, 20);
+    
     // Create button for setting options
     anonCloudSetHeaderDescLabel.setText("Enable access configuration.");
-    anonCloudSetHeaderDescLabel.setBounds(606, 295, 600, 20);
-    anonCloudSetHeaderBtn.setBounds(166, 295, 310, 26);
+    anonCloudSetHeaderDescLabel.setBounds(606, 365, 600, 20);
+    anonCloudSetHeaderBtn.setBounds(166, 365, 310, 26);
     
     // Process and set subdomain file list
     anonCloudSubdomainTakeoverListButton.addActionListener(new ActionListener() {
@@ -906,6 +939,27 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
           
           if (subdomainFile.length() > 0) {
             subdomainFileList = subdomainFile;
+          }
+        }
+      }
+    });
+    
+    // Process and set bucket append/prepend file list
+    anonCloudBucketSubsListButton.addActionListener(new ActionListener() {
+      public void actionPerformed(ActionEvent e) {
+          
+        // Select the file
+        JFileChooser selectFile = new JFileChooser();
+        FileNameExtensionFilter filter = new FileNameExtensionFilter("Text files only", "txt");
+        selectFile.setFileFilter(filter);
+        int returnFile = selectFile.showDialog(anonCloudPanel, "Bucket List");
+        
+        // If a file was chosen, process it
+        if (returnFile == JFileChooser.APPROVE_OPTION) {
+          File bucketFile = selectFile.getSelectedFile();
+          
+          if (bucketFile.length() > 0) {
+            bucketFileList = bucketFile;
           }
         }
       }
@@ -955,6 +1009,11 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
         if (anonCloudSubdomainTakeoverCheck.isSelected()){
           isSubdomainTakeoverSet = true;
         }
+        
+        // Check for extra bucket checks being enabled
+        if (anonCloudBucketSubsCheck.isSelected()){
+          isBucketSubsSet = true;
+        }
       }
     });
     
@@ -983,6 +1042,12 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
     anonCloudPanel.add(anonCloudSubdomainTakeoverListLabel);
     anonCloudPanel.add(anonCloudSubdomainTakeoverListDescLabel);
     anonCloudPanel.add(anonCloudSubdomainTakeoverListButton);
+    anonCloudPanel.add(anonCloudBucketSubsLabel);
+    anonCloudPanel.add(anonCloudBucketSubsDescLabel);
+    anonCloudPanel.add(anonCloudBucketSubsCheck);
+    anonCloudPanel.add(anonCloudBucketSubsListLabel);
+    anonCloudPanel.add(anonCloudBucketSubsListDescLabel);
+    anonCloudPanel.add(anonCloudBucketSubsListButton);
     anonCloudPanel.add(anonCloudSetHeaderBtn);
     anonCloudPanel.add(anonCloudSetHeaderDescLabel);
     
@@ -1082,7 +1147,8 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
         String BucketName = getBucketName("AWS", S3BucketMatch.group(0));
         
         // Perform anonymous checks
-        if (validateBucket("AWS", "anonymous", BucketName)) {
+        if (validateBucket("AWS", "anonymous", BucketName) && !bucketCheckList.contains(BucketName + "-" + "AWS-Anonymous")) {
+          bucketCheckList.add(BucketName + "-" + "AWS-Anonymous");
           
           // Create a finding noting that the bucket is valid
           IScanIssue awsConfirmIssue = new CustomScanIssue(
@@ -1107,10 +1173,19 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
           try {
             publicWriteCheck("AWS", messageInfo, S3BucketMatches, BucketName);
           } catch (Exception ignore) {}
+          
+          // If enabled, append common bucket names to original valid bucket
+          if (isBucketSubsSet) {
+            try {
+              appendBucketName(BucketName.replaceAll("\\.(com|net|org|edu|io)", ""), "AWS", messageInfo, S3BucketMatches);
+            } catch (Exception ignore) {}
+          }
         }
         
         // Perform checks from the perspecitve of any authenticated AWS user
-        if (validateBucket("AWS", "anyuser", BucketName)) {
+        if (validateBucket("AWS", "anyuser", BucketName) && !bucketCheckList.contains(BucketName + "-" + "AWS-Any")) {
+          bucketCheckList.add(BucketName + "-" + "AWS-Any");
+        
           // Check for any authenticated AWS user read bucket access
           try {
             anyAuthReadCheck("AWS", messageInfo, S3BucketMatches, BucketName);
@@ -1143,7 +1218,8 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
         String BucketName = getBucketName("Google", GoogleBucketMatch.group(0));
         
         // Perform anonymous checks for Google
-        if (validateBucket("Google", "anonymous", BucketName)) {
+        if (validateBucket("Google", "anonymous", BucketName) && !bucketCheckList.contains(BucketName + "-" + "Google-Anonymous")) {
+          bucketCheckList.add(BucketName + "-" + "Google-Anonymous");
           
           // Create a finding noting that the bucket is valid
           IScanIssue googleConfirmIssue = new CustomScanIssue(
@@ -1173,10 +1249,19 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
           try {
             publicWriteCheck("Google", messageInfo, GoogleBucketMatches, BucketName);
           } catch (Exception ignore) { }
+          
+          // If enabled, append common bucket names to original valid bucket
+          if (isBucketSubsSet) {
+            try {
+              appendBucketName(BucketName.replaceAll("\\.(com|net|org|edu|io)", ""), "Google", messageInfo, GoogleBucketMatches);
+            } catch (Exception ignore) {}
+          }
         }
         
         // Perform checks from the perspecitve of any authenticated Google user
-        if (validateBucket("Google", "anyuser", BucketName)) {
+        if (validateBucket("Google", "anyuser", BucketName) && !bucketCheckList.contains(BucketName + "-" + "Google-Any")) {
+          bucketCheckList.add(BucketName + "-" + "Google-Any");
+          
           // Check for any authenticated Google user read bucket access
           try {
             anyAuthReadCheck("Google", messageInfo, GoogleBucketMatches, BucketName);
@@ -1214,7 +1299,8 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
         String BucketName = getBucketName("Azure", AzureBucketMatch.group(0));
         
         // Perform anonymous checks for Azure
-        if (validateBucket("Azure", "anonymous", BucketName)) {
+        if (validateBucket("Azure", "anonymous", BucketName) && !bucketCheckList.contains(BucketName + "-" + "Azure-Anonymous")) {
+          bucketCheckList.add(BucketName + "-" + "Azure-Anonymous");
             
           IScanIssue azureAccountIssue = new CustomScanIssue(
             messageInfo.getHttpService(),
@@ -1233,6 +1319,13 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
           try {
             publicReadCheck("Azure", messageInfo, AzureBucketMatches, BucketName);
           } catch (Exception ignore) {}
+          
+          // If enabled, append common bucket names to original valid bucket
+          if (isBucketSubsSet) {
+            try {
+              appendBucketName(BucketName.replaceAll("\\.(com|net|org|edu|io)", ""), "Azure", messageInfo, AzureBucketMatches);
+            } catch (Exception ignore) {}
+          }
         }
       }
       
@@ -1320,10 +1413,19 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
         // Add the Firebase identification issue
         extCallbacks.addScanIssue(firebaseIdIssue);
         
-        // Check for public read/write anonymous access
-        try {
-          gcpFirebaseCheck(messageInfo, GcpFirebaseMatches, GcpFirebaseMatch.group(0));
-        } catch (Exception ignore) {}
+        String firebaseFix = GcpFirebaseMatch.group(0).replaceAll("\\\\", "");
+        if (!firebaseCheckList.contains(firebaseFix)) {
+            firebaseCheckList.add(firebaseFix);
+          // Check for public read/write anonymous access
+          try {
+            gcpFirebaseCheck(messageInfo, GcpFirebaseMatches, GcpFirebaseMatch.group(0));
+          } catch (Exception ignore) {}
+        
+          // Check common other database names
+          try {
+            appendFirebaseName(GcpFirebaseMatch.group(0), messageInfo, GcpFirebaseMatches);
+          } catch (Exception ignore) {}
+        }
       }
     }
     
@@ -1332,7 +1434,314 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
 
   // No active scanning for this but still must define it
   @Override
-  public List<IScanIssue> doActiveScan(IHttpRequestResponse baseRequestResponse, IScannerInsertionPoint insertionPoint) {
+  public List<IScanIssue> doActiveScan(IHttpRequestResponse messageInfo, IScannerInsertionPoint insertionPoint) {
+    // Only process requests if the URL is in scope and the domain has not been checked yet
+    if (extCallbacks.isInScope(extHelpers.analyzeRequest(messageInfo).getUrl())) {
+      // Proceeding checks obtained from https://gist.github.com/fransr/a155e5bd7ab11c93923ec8ce788e3368
+      // Build basic request  
+      Boolean isConfirmedAlready = false;
+      String webDomain = extHelpers.analyzeRequest(messageInfo).getUrl().getHost();
+      String webProto = extHelpers.analyzeRequest(messageInfo).getUrl().getProtocol();
+      int webPort = extHelpers.analyzeRequest(messageInfo).getUrl().getPort();
+      String langHeader = "Accept-Language: en-US,en;q=0.9,sv;q=0.8,zh-TW;q=0.7,zh;q=0.6,fi;q=0.5,it;q=0.4,de;q=0.3";
+      String uaHeader = "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/86.0.4240.75 Safari/537.36";
+      String dateHeader = "Date: " + DateTimeFormatter.RFC_1123_DATE_TIME.format(ZonedDateTime.now(ZoneOffset.UTC));
+    
+      if (!siteOnBucketCheckList.contains(webDomain)) {
+        siteOnBucketCheckList.add(webDomain);
+
+        // Try to create an invalid character URL
+        try {
+       
+          // Create Burp service
+          IHttpService httpService = extHelpers.buildHttpService(webDomain, webPort, webProto);
+          List<String> headersInit = Arrays.asList("GET /%C0 HTTP/1.1", "Host: " + webDomain, langHeader, uaHeader);
+          byte[] requestInit = extHelpers.buildHttpMessage(headersInit, new byte[0]);
+        
+          // Native Burp request
+          IHttpRequestResponse httpReqResp = extCallbacks.makeHttpRequest(httpService, requestInit);
+        
+          // Get the response information
+          String httpReqRespRaw = new String(httpReqResp.getResponse());
+          String httpReqRespBody = httpReqRespRaw.substring(extHelpers.analyzeResponse(httpReqResp.getResponse()).getBodyOffset());
+      
+          // Create a pattern and matcher
+          Pattern invalidCharPattern = Pattern.compile("(<Code>InvalidURI</Code>|Code: InvalidURI|NoSuchKey)", Pattern.CASE_INSENSITIVE);
+          Matcher invalidCharMatch = invalidCharPattern.matcher(httpReqRespBody);
+        
+          // Create an issue noting the domain is hosted on an AWS S3 bucket
+          if (invalidCharMatch.find()) {
+            // Create a finding noting that the domain is hosted on a bucket
+            List<int[]> invalidCharMatches = getMatches(httpReqResp.getResponse(), invalidCharMatch.group(0).getBytes());
+            IScanIssue domainIsBucketIssue = new CustomScanIssue(
+              httpReqResp.getHttpService(),
+              extHelpers.analyzeRequest(httpReqResp).getUrl(), 
+              new IHttpRequestResponse[] { extCallbacks.applyMarkers(httpReqResp, null, invalidCharMatches) },
+              "[Anonymous Cloud] Domain Hosted on AWS S3 Bucket",
+              "The domain appears to be hosted on an AWS S3 bucket based on the response: " + invalidCharMatch.group(0),
+              "Information",
+              "Firm"
+            );
+          
+            // Add confirmed bucket issue
+            extCallbacks.addScanIssue(domainIsBucketIssue);
+            isConfirmedAlready = true;
+          }
+          
+          if (!isConfirmedAlready) {
+            // Create Burp service
+            List<String> headers = Arrays.asList("POST /soap HTTP/1.1", "Host: " + webDomain, langHeader, uaHeader);
+            byte[] request = extHelpers.buildHttpMessage(headers, new byte[0]);
+        
+            // Native Burp request
+            httpReqResp = extCallbacks.makeHttpRequest(httpService, request);
+        
+            // Get the response information
+            httpReqRespRaw = new String(httpReqResp.getResponse());
+            httpReqRespBody = httpReqRespRaw.substring(extHelpers.analyzeResponse(httpReqResp.getResponse()).getBodyOffset());
+      
+            // Create a pattern and matcher
+            Pattern soapPattern = Pattern.compile("(>Missing SOAPAction header<)", Pattern.CASE_INSENSITIVE);
+            Matcher soapMatch = soapPattern.matcher(httpReqRespBody);
+        
+            // Create an issue noting the domain is hosted on an AWS S3 bucket
+            if (soapMatch.find()) {
+              // Create a finding noting that the domain is hosted on a bucket
+              List<int[]> soapMatches = getMatches(httpReqResp.getResponse(), soapMatch.group(0).getBytes());
+              IScanIssue domainIsBucketIssue = new CustomScanIssue(
+                httpReqResp.getHttpService(),
+                extHelpers.analyzeRequest(httpReqResp).getUrl(), 
+                new IHttpRequestResponse[] { extCallbacks.applyMarkers(httpReqResp, null, soapMatches) },
+                "[Anonymous Cloud] Domain Hosted on AWS S3 Bucket",
+                "The domain appears to be hosted on an AWS S3 bucket based on the response: " + soapMatch.group(0),
+                "Information",
+                "Firm"
+              );
+            
+              // Add confirmed bucket issue
+              extCallbacks.addScanIssue(domainIsBucketIssue);
+              isConfirmedAlready = true;
+            }
+          }
+        
+          if (!isConfirmedAlready) {
+            // Create Burp service
+            List<String> headers = Arrays.asList("POSTX /doesnotexist HTTP/1.1", "Host: " + webDomain, langHeader, uaHeader);
+            byte[] request = extHelpers.buildHttpMessage(headers, new byte[0]);
+        
+            // Native Burp request
+            httpReqResp = extCallbacks.makeHttpRequest(httpService, request);
+        
+            // Get the response information
+            httpReqRespRaw = new String(httpReqResp.getResponse());
+            httpReqRespBody = httpReqRespRaw.substring(extHelpers.analyzeResponse(httpReqResp.getResponse()).getBodyOffset());
+      
+            // Create a pattern and matcher
+            Pattern methodPattern = Pattern.compile("(>Missing SOAPAction header<)", Pattern.CASE_INSENSITIVE);
+            Matcher methodMatch = methodPattern.matcher(httpReqRespBody);
+        
+            // Create an issue noting the domain is hosted on an AWS S3 bucket
+            if (methodMatch.find()) {
+              // Create a finding noting that the domain is hosted on a bucket
+              List<int[]> methodMatches = getMatches(httpReqResp.getResponse(), methodMatch.group(0).getBytes());
+              IScanIssue domainIsBucketIssue = new CustomScanIssue(
+                httpReqResp.getHttpService(),
+                extHelpers.analyzeRequest(httpReqResp).getUrl(), 
+                new IHttpRequestResponse[] { extCallbacks.applyMarkers(httpReqResp, null, methodMatches) },
+                "[Anonymous Cloud] Domain Hosted on AWS S3 Bucket",
+                "The domain appears to be hosted on an AWS S3 bucket based on the response: " + methodMatch.group(0),
+                "Information",
+                "Firm"
+              );
+            
+              // Add confirmed bucket issue
+              extCallbacks.addScanIssue(domainIsBucketIssue);
+              isConfirmedAlready = true;
+            }
+          }
+        
+          if (!isConfirmedAlready && isAwsAuthSet) {
+            // Create Burp service
+            List<String> headers = Arrays.asList("POST /doesnotexist?123 HTTP/1.1", "Host: " + webDomain, "Authorization: AWS " + awsAccessKey + ":x", dateHeader, langHeader, uaHeader);
+            byte[] request = extHelpers.buildHttpMessage(headers, new byte[0]);
+        
+            // Native Burp request
+            httpReqResp = extCallbacks.makeHttpRequest(httpService, request);
+        
+            // Get the response information
+            httpReqRespRaw = new String(httpReqResp.getResponse());
+            httpReqRespBody = httpReqRespRaw.substring(extHelpers.analyzeResponse(httpReqResp.getResponse()).getBodyOffset());
+      
+            // Create a pattern and matcher
+            Pattern postSignPattern = Pattern.compile("(</StringToSign>)", Pattern.CASE_INSENSITIVE);
+            Matcher postSignMatch = postSignPattern.matcher(httpReqRespBody);
+        
+            // Create an issue noting the domain is hosted on an AWS S3 bucket
+            if (postSignMatch.find()) {
+              // Create a finding noting that the domain is hosted on a bucket
+              List<int[]> postSignMatches = getMatches(httpReqResp.getResponse(), postSignMatch.group(0).getBytes());
+              IScanIssue domainIsBucketIssue = new CustomScanIssue(
+                httpReqResp.getHttpService(),
+                extHelpers.analyzeRequest(httpReqResp).getUrl(), 
+                new IHttpRequestResponse[] { extCallbacks.applyMarkers(httpReqResp, null, postSignMatches) },
+                "[Anonymous Cloud] Domain Hosted on AWS S3 Bucket",
+                "The domain appears to be hosted on an AWS S3 bucket based on the response: " + postSignMatch.group(0),
+                "Information",
+                "Firm"
+              );
+            
+              // Add confirmed bucket issue
+              extCallbacks.addScanIssue(domainIsBucketIssue);
+              isConfirmedAlready = true;
+            }
+          }
+        
+          if (!isConfirmedAlready && isAwsAuthSet) {
+            // Create Burp service
+            List<String> headers = Arrays.asList("GET /doesnotexist?AWSAccessKeyId=" + awsAccessKey + "&Expires=1603060100&Signature=x HTTP/1.1", "Host: " + webDomain, dateHeader, langHeader, uaHeader);
+            byte[] request = extHelpers.buildHttpMessage(headers, new byte[0]);
+        
+            // Native Burp request
+            httpReqResp = extCallbacks.makeHttpRequest(httpService, request);
+        
+            // Get the response information
+            httpReqRespRaw = new String(httpReqResp.getResponse());
+            httpReqRespBody = httpReqRespRaw.substring(extHelpers.analyzeResponse(httpReqResp.getResponse()).getBodyOffset());
+      
+            // Create a pattern and matcher
+            Pattern getSignPattern = Pattern.compile("(</StringToSign>)", Pattern.CASE_INSENSITIVE);
+            Matcher getSignMatch = getSignPattern.matcher(httpReqRespBody);
+        
+            // Create an issue noting the domain is hosted on an AWS S3 bucket
+            if (getSignMatch.find()) {
+              // Create a finding noting that the domain is hosted on a bucket
+              List<int[]> getSignMatches = getMatches(httpReqResp.getResponse(), getSignMatch.group(0).getBytes());
+              IScanIssue domainIsBucketIssue = new CustomScanIssue(
+                httpReqResp.getHttpService(),
+                extHelpers.analyzeRequest(httpReqResp).getUrl(), 
+                new IHttpRequestResponse[] { extCallbacks.applyMarkers(httpReqResp, null, getSignMatches) },
+                "[Anonymous Cloud] Domain Hosted on AWS S3 Bucket",
+                "The domain appears to be hosted on an AWS S3 bucket based on the response: " + getSignMatch.group(0),
+                "Information",
+                "Firm"
+              );
+            
+              // Add confirmed bucket issue
+              extCallbacks.addScanIssue(domainIsBucketIssue);
+              isConfirmedAlready = true;
+            }
+          }
+        
+          if (!isConfirmedAlready && isAwsAuthSet) {
+            // Create Burp service
+            List<String> headers = Arrays.asList("PUT /doesnotexist?AWSAccessKeyId=" + awsAccessKey + "&Expires=1603060100&Signature=x HTTP/1.1", "Host: " + webDomain, dateHeader, langHeader, uaHeader);
+            byte[] request = extHelpers.buildHttpMessage(headers, new byte[0]);
+        
+            // Native Burp request
+            httpReqResp = extCallbacks.makeHttpRequest(httpService, request);
+        
+            // Get the response information
+            httpReqRespRaw = new String(httpReqResp.getResponse());
+            httpReqRespBody = httpReqRespRaw.substring(extHelpers.analyzeResponse(httpReqResp.getResponse()).getBodyOffset());
+      
+            // Create a pattern and matcher
+            Pattern putSignPattern = Pattern.compile("(</StringToSign>)", Pattern.CASE_INSENSITIVE);
+            Matcher putSignMatch = putSignPattern.matcher(httpReqRespBody);
+        
+            // Create an issue noting the domain is hosted on an AWS S3 bucket
+            if (putSignMatch.find()) {
+              // Create a finding noting that the domain is hosted on a bucket
+              List<int[]> putSignMatches = getMatches(httpReqResp.getResponse(), putSignMatch.group(0).getBytes());
+              IScanIssue domainIsBucketIssue = new CustomScanIssue(
+                httpReqResp.getHttpService(),
+                extHelpers.analyzeRequest(httpReqResp).getUrl(), 
+                new IHttpRequestResponse[] { extCallbacks.applyMarkers(httpReqResp, null, putSignMatches) },
+                "[Anonymous Cloud] Domain Hosted on AWS S3 Bucket",
+                "The domain appears to be hosted on an AWS S3 bucket based on the response: " + putSignMatch.group(0),
+                "Information",
+                "Firm"
+              );
+            
+              // Add confirmed bucket issue
+              extCallbacks.addScanIssue(domainIsBucketIssue);
+              isConfirmedAlready = true;
+            }
+          }
+        
+          if (!isConfirmedAlready && isAwsAuthSet) {
+            // Create Burp service
+            List<String> headers = Arrays.asList("POST /doesnotexist?987 HTTP/1.1", "Host: " + webDomain, "Authorization: AWS " + awsAccessKey + ":x", dateHeader, langHeader, uaHeader);
+            byte[] request = extHelpers.buildHttpMessage(headers, extCallbacks.getHelpers().stringToBytes("a=b"));
+        
+            // Native Burp request
+            httpReqResp = extCallbacks.makeHttpRequest(httpService, request);
+        
+            // Get the response information
+            httpReqRespRaw = new String(httpReqResp.getResponse());
+            httpReqRespBody = httpReqRespRaw.substring(extHelpers.analyzeResponse(httpReqResp.getResponse()).getBodyOffset());
+      
+            // Create a pattern and matcher
+            Pattern multipartSignPattern = Pattern.compile("(</StringToSign>)", Pattern.CASE_INSENSITIVE);
+            Matcher multipartSignMatch = multipartSignPattern.matcher(httpReqRespBody);
+        
+            // Create an issue noting the domain is hosted on an AWS S3 bucket
+            if (multipartSignMatch.find()) {
+              // Create a finding noting that the domain is hosted on a bucket
+              List<int[]> multipartSignMatches = getMatches(httpReqResp.getResponse(), multipartSignMatch.group(0).getBytes());
+              IScanIssue domainIsBucketIssue = new CustomScanIssue(
+                httpReqResp.getHttpService(),
+                extHelpers.analyzeRequest(httpReqResp).getUrl(), 
+                new IHttpRequestResponse[] { extCallbacks.applyMarkers(httpReqResp, null, multipartSignMatches) },
+                "[Anonymous Cloud] Domain Hosted on AWS S3 Bucket",
+                "The domain appears to be hosted on an AWS S3 bucket based on the response: " + multipartSignMatch.group(0),
+                "Information",
+                "Firm"
+              );
+            
+              // Add confirmed bucket issue
+              extCallbacks.addScanIssue(domainIsBucketIssue);
+              isConfirmedAlready = true;
+            }
+          }
+        
+          if (!isConfirmedAlready && isAwsAuthSet) {
+            // Create Burp service
+            List<String> headers = Arrays.asList("GET /doesnotexist?456 HTTP/1.1", "Host: " + webDomain, "Authorization: AWS4-HMAC-SHA256 Credential=" + awsAccessKey + "/20180101/ap-south-1/s3/aws4_request,SignedHeaders=date;host;x-amz-acl;x-amz-content-sha256;x-amz-date,Signature=x", dateHeader, "x-amz-content-sha256: STREAMING-AWS4-HMAC-SHA256-PAYLOAD", langHeader, uaHeader);
+            byte[] request = extHelpers.buildHttpMessage(headers, new byte[0]);
+        
+            // Native Burp request
+            httpReqResp = extCallbacks.makeHttpRequest(httpService, request);
+        
+            // Get the response information
+            httpReqRespRaw = new String(httpReqResp.getResponse());
+            httpReqRespBody = httpReqRespRaw.substring(extHelpers.analyzeResponse(httpReqResp.getResponse()).getBodyOffset());
+      
+            // Create a pattern and matcher
+            Pattern streamingSignPattern = Pattern.compile("(<CanonicalRequest>)", Pattern.CASE_INSENSITIVE);
+            Matcher streamingSignMatch = streamingSignPattern.matcher(httpReqRespBody);
+        
+            // Create an issue noting the domain is hosted on an AWS S3 bucket
+            if (streamingSignMatch.find()) {
+              // Create a finding noting that the domain is hosted on a bucket
+              List<int[]> streamingSignMatches = getMatches(httpReqResp.getResponse(), streamingSignMatch.group(0).getBytes());
+              IScanIssue domainIsBucketIssue = new CustomScanIssue(
+                httpReqResp.getHttpService(),
+                extHelpers.analyzeRequest(httpReqResp).getUrl(), 
+                new IHttpRequestResponse[] { extCallbacks.applyMarkers(httpReqResp, null, streamingSignMatches) },
+                "[Anonymous Cloud] Domain Hosted on AWS S3 Bucket",
+                "The domain appears to be hosted on an AWS S3 bucket based on the response: " + streamingSignMatch.group(0),
+                "Information",
+                "Firm"
+              );
+            
+              // Add confirmed bucket issue
+              extCallbacks.addScanIssue(domainIsBucketIssue);
+              isConfirmedAlready = true;
+            }
+          }
+        } catch (Exception ignore) {}
+      }
+    }
     return null;
   }
   
@@ -1370,6 +1779,7 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
         BucketName = BucketUrl.split("\\.")[0].replaceAll("(http|https)://", "");
       }
     }
+    BucketName = BucketName.replaceAll("\\\\", "");
     return BucketName;
   }
   
@@ -1465,6 +1875,100 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
     } else {
       return false;
     }
+  }
+  
+  // Append bucket names to validated bucket
+  private void appendBucketName(String BucketName, String BucketType, IHttpRequestResponse messageInfo, List<int[]>BucketMatches) {
+    try {
+              
+      // If provided with a file, use it, otherwise use default
+      if (bucketFileList.exists() && bucketFileList.length() > 0) {
+
+        BufferedReader rd = new BufferedReader(new FileReader(bucketFileList));
+        String line = null;
+      
+        // Loop through each line
+        while((line = rd.readLine()) != null) {
+          // Add to bucket list if unique
+          if (!bucketList.contains(BucketName + line) && !line.equals(BucketName)) {
+            bucketList.add(BucketName + line);
+          }
+        }
+        
+        // Loop through the list of buckets to test
+        for (int i = 0; i < bucketList.size(); i++) {
+            
+          // Perform anonymous checks
+          if (validateBucket(BucketType, "anonymous", bucketList.get(i).toString())) {
+          
+            // Create a finding noting that the bucket is valid
+            IScanIssue bucketConfirmIssue = new CustomScanIssue(
+              messageInfo.getHttpService(),
+              extHelpers.analyzeRequest(messageInfo).getUrl(), 
+              new IHttpRequestResponse[] { extCallbacks.applyMarkers(messageInfo, null, BucketMatches) },
+              "[Anonymous Cloud] " + BucketType + " Bucket Exists",
+              "The following bucket was confirmed to be valid: " + bucketList.get(i).toString(),
+              "Low",
+              "Certain"
+            );
+          
+            // Add confirmed bucket issue
+            extCallbacks.addScanIssue(bucketConfirmIssue);
+          
+            // Check for public read bucket anonymous access
+            try {
+              publicReadCheck(BucketType, messageInfo, BucketMatches, bucketList.get(i).toString());
+            } catch (Exception ignore) {}
+            
+            // Perform other read/write checks as long as it isn't Azure
+            if (!BucketType.contains("Azure")) {
+              // Check for public write bucket anonymous access
+              try {
+                publicWriteCheck(BucketType, messageInfo, BucketMatches, bucketList.get(i).toString());
+              } catch (Exception ignore) {}
+            
+              // Check for any authenticated AWS user read bucket access
+              try {
+                anyAuthReadCheck(BucketType, messageInfo, BucketMatches, bucketList.get(i).toString());
+              } catch (Exception ignore) {}
+          
+              // Check for any authenticated AWS user write bucket access
+              try {
+                anyAuthWriteCheck(BucketType, messageInfo, BucketMatches, bucketList.get(i).toString());
+              } catch (Exception ignore) {}
+            }
+          }
+        }
+      }
+    } catch (Exception ignore) {}
+  }
+  
+    // Append bucket names to validated bucket
+  private void appendFirebaseName(String firebaseDb, IHttpRequestResponse messageInfo, List<int[]>FirebaseMatches) {
+    String FirebaseName = firebaseDb.replaceAll("\\.firebaseio\\.com.*", "");
+      
+    try {
+              
+      // If provided with a file, use it, otherwise use default
+      if (bucketFileList.exists() && bucketFileList.length() > 0) {
+
+        BufferedReader rd = new BufferedReader(new FileReader(bucketFileList));
+        String line = null;
+      
+        // Loop through each line
+        while((line = rd.readLine()) != null) {
+          // Add to bucket list if unique
+          if (!firebaseList.contains(FirebaseName + line) && !line.equals(FirebaseName) && !line.contains(".")) {
+            firebaseList.add(FirebaseName + line + ".firebaseio.com");
+          }
+        }
+        
+        // Loop through the list of buckets to test
+        for (int i = 0; i < firebaseList.size(); i++) {
+          gcpFirebaseCheck(messageInfo, FirebaseMatches, firebaseList.get(i).toString());  
+        }
+      }
+    } catch (Exception ignore) {}
   }
   
   // Generate random strings for write test
@@ -2302,6 +2806,7 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
   private void gcpFirebaseCheck(IHttpRequestResponse messageInfo, List<int[]>matches, String firebaseDb) {
     // Create a client to check Google for the Firebase DB
     HttpClient readClient = HttpClientBuilder.create().build();
+    firebaseDb = firebaseDb.replaceAll("\\\\", "");
     HttpGet readReq = new HttpGet("https://" + firebaseDb + "/.json");
 
     // Connect to GCP services for Firebase DB access
@@ -2332,8 +2837,22 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
           "Certain"
         );
           
-          // Add public write bucket access issue
+          // Add public read firebase db access issue
           extCallbacks.addScanIssue(publicReadIssue);
+        } else if (readRespHeaders.contains("401 Unauthorized") || readRespHeaders.contains("402 Payment")) {
+          // Create a finding noting that the Firebase DB is valid
+          IScanIssue firebaseConfirmIssue = new CustomScanIssue(
+            messageInfo.getHttpService(),
+            extHelpers.analyzeRequest(messageInfo).getUrl(), 
+            new IHttpRequestResponse[] { extCallbacks.applyMarkers(messageInfo, null, matches) },
+            "[Anonymous Cloud] Firebase Database Exists",
+            "The following Firebase database was confirmed to be valid: " + firebaseDb,
+            "Low",
+            "Certain"
+          );
+          
+          // Add valid firebase db access issue
+          extCallbacks.addScanIssue(firebaseConfirmIssue);
         }
       } catch (Exception ignore) { }
     
