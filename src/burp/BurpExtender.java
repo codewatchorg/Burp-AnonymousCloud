@@ -1,6 +1,6 @@
 /*
  * Name:           Burp Anonymous Cloud
- * Version:        0.1.11
+ * Version:        0.1.12
  * Date:           1/21/2020
  * Author:         Josh Berry - josh.berry@codewatch.org
  * Github:         https://github.com/codewatchorg/Burp-AnonymousCloud
@@ -756,15 +756,17 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
   // Setup extension wide variables
   public IBurpExtenderCallbacks extCallbacks;
   public IExtensionHelpers extHelpers;
-  private static final String burpAnonCloudVersion = "0.1.11";
+  private static final String burpAnonCloudVersion = "0.1.12";
   private static final Pattern S3BucketPattern = Pattern.compile("((?:\\w+://)?(?:([\\w.-]+)\\.s3[\\w.-]*\\.amazonaws\\.com|s3(?:[\\w.-]*\\.amazonaws\\.com(?:(?::\\d+)?\\\\?/)*|://)([\\w.-]+))(?:(?::\\d+)?\\\\?/)?(?:.*?\\?.*Expires=(\\d+))?)", Pattern.CASE_INSENSITIVE);
   private static final Pattern GoogleBucketPattern = Pattern.compile("((?:\\w+://)?(?:([\\w.-]+)\\.storage[\\w-]*\\.googleapis\\.com|(?:(?:console\\.cloud\\.google\\.com/storage/browser/|storage\\.cloud\\.google\\.com|storage[\\w-]*\\.googleapis\\.com)(?:(?::\\d+)?\\\\?/)*|gs://)([\\w.-]+))(?:(?::\\d+)?\\\\?/([^\\s?'\"#]*))?(?:.*\\?.*Expires=(\\d+))?)", Pattern.CASE_INSENSITIVE);
   private static final Pattern GcpFirebase = Pattern.compile("([\\w.-]+\\.firebaseio\\.com)", Pattern.CASE_INSENSITIVE );
+  private static final Pattern GcpFirestorePattern = Pattern.compile("(firestore\\.googleapis\\.com.*)", Pattern.CASE_INSENSITIVE );
   private static final Pattern AzureBucketPattern = Pattern.compile("(([\\w.-]+\\.blob\\.core\\.windows\\.net(?::\\d+)?\\\\?/[\\w.-]+)(?:.*?\\?.*se=([\\w%-]+))?)", Pattern.CASE_INSENSITIVE);
   private static final Pattern AzureTablePattern = Pattern.compile("(([\\w.-]+\\.table\\.core\\.windows\\.net(?::\\d+)?\\\\?/[\\w.-]+)(?:.*?\\?.*se=([\\w%-]+))?)", Pattern.CASE_INSENSITIVE);
   private static final Pattern AzureQueuePattern = Pattern.compile("(([\\w.-]+\\.queue\\.core\\.windows\\.net(?::\\d+)?\\\\?/[\\w.-]+)(?:.*?\\?.*se=([\\w%-]+))?)", Pattern.CASE_INSENSITIVE);
   private static final Pattern AzureFilePattern = Pattern.compile("(([\\w.-]+\\.file\\.core\\.windows\\.net(?::\\d+)?\\\\?/[\\w.-]+)(?:.*?\\?.*se=([\\w%-]+))?)", Pattern.CASE_INSENSITIVE);
   private static final Pattern AzureCosmosPattern = Pattern.compile("(([\\w.-]+\\.documents\\.azure\\.com(?::\\d+)?\\\\?/[\\w.-]+)(?:.*?\\?.*se=([\\w%-]+))?)", Pattern.CASE_INSENSITIVE);
+  private static final Pattern ParseServerPattern = Pattern.compile("(X\\-Parse\\-Application\\-Id:)", Pattern.CASE_INSENSITIVE);
   public JPanel anonCloudPanel;
   private String awsAccessKey = "";
   private String awsSecretAccessKey = "";
@@ -786,6 +788,7 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
   private ArrayList bucketList = new ArrayList();
   private ArrayList firebaseList = new ArrayList();
   private ArrayList firebaseCheckList = new ArrayList();
+  private ArrayList firestoreCheckList = new ArrayList();
   private ArrayList bucketCheckList = new ArrayList();
   private ArrayList siteOnBucketCheckList = new ArrayList();
   AWSCredentials anonCredentials = new AnonymousAWSCredentials();
@@ -1113,8 +1116,9 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
         }
       }
         
-      // Setup default response body variables
+      // Setup default request/response body variables
       String respRaw = new String(messageInfo.getResponse());
+      String reqRaw = new String(messageInfo.getRequest());
       String respBody = respRaw.substring(extHelpers.analyzeResponse(messageInfo.getResponse()).getBodyOffset());
       
       // Create patter matchers for each type
@@ -1126,6 +1130,8 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
       Matcher AzureFileMatch = AzureFilePattern.matcher(respBody);
       Matcher AzureCosmosMatch = AzureCosmosPattern.matcher(respBody);
       Matcher GcpFirebaseMatch = GcpFirebase.matcher(respBody);
+      Matcher GcpFirestoreRespMatch = GcpFirestorePattern.matcher(respBody);
+      Matcher ParseServerMatch = ParseServerPattern.matcher(reqRaw);
       
       // Create an issue noting an AWS S3 Bucket was identified in the response
       if (S3BucketMatch.find()) {
@@ -1426,6 +1432,49 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
             appendFirebaseName(GcpFirebaseMatch.group(0), messageInfo, GcpFirebaseMatches);
           } catch (Exception ignore) {}
         }
+      }
+      
+      // Check for open Firestore access
+      if (GcpFirestoreRespMatch.find()) {
+        List<int[]> GcpFirestoreRespMatches = getMatches(messageInfo.getResponse(), GcpFirestoreRespMatch.group(0).getBytes());
+        IScanIssue firestoreIdIssue = new CustomScanIssue(
+          messageInfo.getHttpService(),
+          extHelpers.analyzeRequest(messageInfo).getUrl(), 
+          new IHttpRequestResponse[] { extCallbacks.applyMarkers(messageInfo, null, GcpFirestoreRespMatches) },
+          "[Anonymous Cloud] Firestore Database Identified",
+          "The response body contained the following Firestore database: " + GcpFirestoreRespMatch.group(0),
+          "Information",
+          "Firm"
+        );
+        
+        // Add the Firebase identification issue
+        extCallbacks.addScanIssue(firestoreIdIssue);
+        
+        String firestoreFix = GcpFirestoreRespMatch.group(0).replaceAll("\\\\", "");
+        if (!firestoreCheckList.contains(firestoreFix)) {
+            firestoreCheckList.add(firestoreFix);
+          // Check for public read/write anonymous access
+          try {
+            gcpFirestoreCheck(messageInfo, null, GcpFirestoreRespMatches, GcpFirestoreRespMatch.group(0));
+          } catch (Exception ignore) {}
+        }
+      }
+      
+      // Create an issue noting the use of Parse Server based on the request
+      if (ParseServerMatch.find()) {
+        List<int[]> ParseServerMatches = getMatches(messageInfo.getRequest(), ParseServerMatch.group(0).getBytes());
+        IScanIssue parseServerIdIssue = new CustomScanIssue(
+          messageInfo.getHttpService(),
+          extHelpers.analyzeRequest(messageInfo).getUrl(), 
+          new IHttpRequestResponse[] { extCallbacks.applyMarkers(messageInfo, ParseServerMatches, null) },
+          "[Anonymous Cloud] Parse Server Identified",
+          "The response headers contained the following Parse Server application ID: " + ParseServerMatch.group(0),
+          "Information",
+          "Firm"
+        );
+        
+        // Add the Parse Server identification issue
+        extCallbacks.addScanIssue(parseServerIdIssue);
       }
     }
     
@@ -2885,6 +2934,58 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
           extCallbacks.addScanIssue(publicReadIssue);
         }
       } catch (Exception ignore) { }
+  }
+  
+  // Perform anonymous public read access check for a discovered Firestore DB
+  private void gcpFirestoreCheck(IHttpRequestResponse messageInfo, List<int[]>reqMatches, List<int[]>respMatches, String firebaseDb) {
+      
+    // First validate we can check
+    firebaseDb = firebaseDb.replaceAll("\\\\", "");
+    Pattern GcpFirestoreFullPattern = Pattern.compile("(firestore\\.googleapis\\.com\\/v1\\/projects\\/[\\w.-]+\\/databases\\/\\(default\\)\\/documents\\/[\\w.-~]+)", Pattern.CASE_INSENSITIVE);
+    Matcher GcpFirestoreFullMatch = GcpFirestoreFullPattern.matcher(firebaseDb);
+    
+    if (GcpFirestoreFullMatch.find()) {
+      // Create a client to check Google for the Firestore DB
+      HttpClient readClient = HttpClientBuilder.create().build();
+      HttpGet readReq = new HttpGet("https://" + GcpFirestoreFullMatch.group(0));
+
+      // Connect to GCP services for Firestore DB access
+      try {
+        HttpResponse readResp = readClient.execute(readReq);
+        String readRespHeaders = readResp.getStatusLine().toString();
+
+        // If the status is 200, it is public, otherwise doesn't exist or requires auth
+        if (readRespHeaders.contains("200 OK")) {
+          // Create public access issue
+          IScanIssue publicReadIssue = new CustomScanIssue(
+            messageInfo.getHttpService(),
+            extHelpers.analyzeRequest(messageInfo).getUrl(),
+            new IHttpRequestResponse[] { extCallbacks.applyMarkers(messageInfo, reqMatches, respMatches) },
+            "[Anonymous Cloud] Publicly Accessible Firestore Database",
+            "The following Firestore database is publicly readable: " + GcpFirestoreFullMatch.group(0),
+            "Medium",
+            "Certain"
+          );
+          
+          // Add public read Firestore db access issue
+          extCallbacks.addScanIssue(publicReadIssue);
+        } else if (readRespHeaders.contains("403 Forbidden")) {
+          // Create a finding noting that the Firestore DB is valid
+          IScanIssue firestoreConfirmIssue = new CustomScanIssue(
+            messageInfo.getHttpService(),
+            extHelpers.analyzeRequest(messageInfo).getUrl(), 
+            new IHttpRequestResponse[] { extCallbacks.applyMarkers(messageInfo, reqMatches, respMatches) },
+            "[Anonymous Cloud] Firestore Database Exists",
+            "The following Firestore database was confirmed to be valid: " + GcpFirestoreFullMatch.group(0),
+            "Low",
+            "Certain"
+          );
+          
+          // Add valid firestore db access issue
+          extCallbacks.addScanIssue(firestoreConfirmIssue);
+        }
+      } catch (Exception ignore) { }
+    }
   }
   
   @Override
