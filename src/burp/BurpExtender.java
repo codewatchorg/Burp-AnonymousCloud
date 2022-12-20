@@ -1,6 +1,6 @@
 /*
  * Name:           Burp Anonymous Cloud
- * Version:        0.1.12
+ * Version:        0.1.13
  * Date:           1/21/2020
  * Author:         Josh Berry - josh.berry@codewatch.org
  * Github:         https://github.com/codewatchorg/Burp-AnonymousCloud
@@ -92,7 +92,7 @@ class SubdomainTakeover implements IBurpExtender, Runnable {
   private static final String waybackMachineUrl = "http://web.archive.org/cdx/search/cdx?output=json&url=";
   private static final String hackerTargetUrl = "http://api.hackertarget.com/hostsearch/?q=";
   private static final String shodanBaseUrl = "https://api.shodan.io/dns/domain/";
-  private static final String censysBaseUrl = "https://censys.io/api/v1/search/";
+  private static final String censysBaseUrl = "https://search.censys.io/api/v1/search/";
   private static final Pattern censysCertPattern = Pattern.compile("([\\w.-]*CN\\=(.*)?)", Pattern.CASE_INSENSITIVE );
   private String shodanUrl = "";
   private String censysUrl = "";
@@ -756,7 +756,7 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
   // Setup extension wide variables
   public IBurpExtenderCallbacks extCallbacks;
   public IExtensionHelpers extHelpers;
-  private static final String burpAnonCloudVersion = "0.1.12";
+  private static final String burpAnonCloudVersion = "0.1.13";
   private static final Pattern S3BucketPattern = Pattern.compile("((?:\\w+://)?(?:([\\w.-]+)\\.s3[\\w.-]*\\.amazonaws\\.com|s3(?:[\\w.-]*\\.amazonaws\\.com(?:(?::\\d+)?\\\\?/)*|://)([\\w.-]+))(?:(?::\\d+)?\\\\?/)?(?:.*?\\?.*Expires=(\\d+))?)", Pattern.CASE_INSENSITIVE);
   private static final Pattern GoogleBucketPattern = Pattern.compile("((?:\\w+://)?(?:([\\w.-]+)\\.storage[\\w-]*\\.googleapis\\.com|(?:(?:console\\.cloud\\.google\\.com/storage/browser/|storage\\.cloud\\.google\\.com|storage[\\w-]*\\.googleapis\\.com)(?:(?::\\d+)?\\\\?/)*|gs://)([\\w.-]+))(?:(?::\\d+)?\\\\?/([^\\s?'\"#]*))?(?:.*\\?.*Expires=(\\d+))?)", Pattern.CASE_INSENSITIVE);
   private static final Pattern GcpFirebase = Pattern.compile("([\\w.-]+\\.firebaseio\\.com)", Pattern.CASE_INSENSITIVE );
@@ -774,6 +774,7 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
   private String shodanApiKey = "";
   private String censysApiKey = "";
   private String censysApiSecret = "";
+  private String anonCloudConfig = "anon-cloud-config.conf";
   private static final String GoogleValidationUrl = "https://storage.googleapis.com/storage/v1/b/";
   private static final String GoogleBucketUploadUrl = "https://storage.googleapis.com/upload/storage/v1/b/";
   private Boolean isAwsAuthSet = false;
@@ -926,6 +927,95 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
     anonCloudSetHeaderDescLabel.setBounds(606, 365, 600, 20);
     anonCloudSetHeaderBtn.setBounds(166, 365, 310, 26);
     
+    // Print extension header
+    printHeader();
+    
+    File anonCloudConfigFile = new File(extCallbacks.getExtensionFilename().replace("AnonymousCloud.jar", "") + anonCloudConfig);
+    if (anonCloudConfigFile.isFile()) {
+        printOut.println("Reading configuration file: " + extCallbacks.getExtensionFilename().replace("AnonymousCloud.jar", "") + anonCloudConfig.toString());
+        
+        try {
+            BufferedReader br = new BufferedReader(new FileReader(extCallbacks.getExtensionFilename().replace("AnonymousCloud.jar", "") + anonCloudConfig));
+               
+            for (String line = br.readLine(); line != null; line = br.readLine()) {
+                String configLine[] = line.split(":",0);
+                if (configLine[0].equals("AWSAccessKey")) {
+                    awsAccessKey = configLine[1];
+                } else if (configLine[0].equals("AWSSecretKey")) {
+                    awsSecretAccessKey = configLine[1];
+                } else if (configLine[0].equals("GoogleBearerToken")) {
+                    googleBearerToken = configLine[1];
+                    
+                    // Add Google Bearer Token if set
+                    if (googleBearerToken.matches("^ya29\\.[0-9A-Za-z\\-_]+")) {
+                        isGoogleAuthSet = true;
+                        anonCloudGoogleBearerText.setText(googleBearerToken);
+                    }
+                } else if (configLine[0].equals("ShodanKey")) {
+                    shodanApiKey = configLine[1];
+                    
+                    // Add Shodan API key if set
+                    if (shodanApiKey.matches("^[a-zA-Z0-9]+")) {
+                        isShodanApiSet = true;
+                        anonCloudSubdomainShodanText.setText(shodanApiKey);
+                    }
+                } else if (configLine[0].equals("CensysKey")) {
+                    censysApiKey = configLine[1];
+                } else if (configLine[0].equals("CensysSecret")) {
+                    censysApiSecret = configLine[1];
+                } else if (configLine[0].equals("SubdomainTakeover")) {
+                    if (configLine[1].equals("true")) {
+                        anonCloudSubdomainTakeoverCheck.setSelected(true);
+                        isSubdomainTakeoverSet = true;
+                    }
+                } else if (isSubdomainTakeoverSet && configLine[0].equals("SubdomainList")) {
+                    File subdomainFile = new File(configLine[1] + ":" + configLine[2]);
+                    
+                    if (subdomainFile.length() > 0) {
+                        subdomainFileList = subdomainFile;
+                        printOut.println("Setting subdomain file to: " + subdomainFile.toString());
+                    }
+                } else if (configLine[0].equals("ExtraBuckets")) {
+                    if (configLine[1].equals("true")) {
+                        anonCloudBucketSubsCheck.setSelected(true);
+                        isBucketSubsSet = true;
+                    }
+                } else if (isBucketSubsSet && configLine[0].equals("ExtraBucketsList")) {
+                    File bucketFile = new File(configLine[1] + ":" + configLine[2]);
+                    
+                    if (bucketFile.length() > 0) {
+                        bucketFileList = bucketFile;
+                        printOut.println("Setting buckets file to: " + bucketFile.toString());
+                    }
+                }      
+            }
+            
+            // Auth to AWS
+            if (awsAccessKey.matches("^(AIza[0-9A-Za-z-_]{35}|A3T[A-Z0-9]|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|AGPA[A-Z0-9]{16}|AIDA[A-Z0-9]{16}|AROA[A-Z0-9]{16}|AIPA[A-Z0-9]{16}|ANPA[A-Z0-9]{16}|ANVA[A-Z0-9]{16})") && awsSecretAccessKey.length() == 40) {
+
+                // Setup an authenticated S3 client for buckets configured to allow all authenticated AWS users
+                authCredentials = new BasicAWSCredentials(awsAccessKey, awsSecretAccessKey);
+                authS3client = AmazonS3ClientBuilder
+                    .standard()
+                    .withForceGlobalBucketAccessEnabled(true)
+                    .withRegion(Regions.DEFAULT_REGION)
+                    .withCredentials(new AWSStaticCredentialsProvider(authCredentials))
+                    .build();
+          
+                isAwsAuthSet = true;
+                anonCloudAwsKeyText.setText(awsAccessKey);
+                anonCloudAwsSecretKeyText.setText(awsSecretAccessKey);
+            }
+        
+            // Add Censys API key if set
+            if (censysApiKey.matches("^[a-zA-Z0-9\\-]+") && censysApiSecret.matches("^[a-zA-Z0-9]+")) {
+                isCensysApiSet = true;
+                anonCloudSubdomainCensysText.setText(censysApiKey);
+                anonCloudSubdomainCensysSecretText.setText(censysApiSecret);
+            }
+        } catch (Exception ignore) { }
+    }
+    
     // Process and set subdomain file list
     anonCloudSubdomainTakeoverListButton.addActionListener(new ActionListener() {
       public void actionPerformed(ActionEvent e) {
@@ -942,6 +1032,7 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
           
           if (subdomainFile.length() > 0) {
             subdomainFileList = subdomainFile;
+            printOut.println("Setting subdomain file to: " + subdomainFile.toString() + "\n");
           }
         }
       }
@@ -963,6 +1054,7 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
           
           if (bucketFile.length() > 0) {
             bucketFileList = bucketFile;
+            printOut.println("Setting buckets file to: " + bucketFile.toString() + "\n");
           }
         }
       }
@@ -1017,6 +1109,14 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
         if (anonCloudBucketSubsCheck.isSelected()){
           isBucketSubsSet = true;
         }
+        
+        try {
+            printOut.println("Writing config file: " + extCallbacks.getExtensionFilename().replace("AnonymousCloud.jar", "") + anonCloudConfig.toString() + "\n");
+            PrintWriter anonCloudConfigFileObj = new PrintWriter(extCallbacks.getExtensionFilename().replace("AnonymousCloud.jar", "") + anonCloudConfig);
+            String configText = "AWSAccessKey:" + awsAccessKey + "\nAWSSecretKey:" + awsSecretAccessKey + "\nGoogleBearerToken:" + googleBearerToken + "\nShodanKey:" + shodanApiKey + "\nCensysKey:" + censysApiKey + "\nCensysSecret:" + censysApiSecret + "\nSubdomainTakeover:" + isSubdomainTakeoverSet.toString() + "\nSubdomainList:" + subdomainFileList.toString() + "\nExtraBuckets:" + isBucketSubsSet.toString() + "\nExtraBucketsList:" + bucketFileList.toString();
+            anonCloudConfigFileObj.println(configText);
+            anonCloudConfigFileObj.close();
+        } catch (Exception ignore) { }
       }
     });
     
@@ -1054,8 +1154,6 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab {
     anonCloudPanel.add(anonCloudSetHeaderBtn);
     anonCloudPanel.add(anonCloudSetHeaderDescLabel);
     
-    // Print extension header
-    printHeader();
     
     // Add the tab to Burp
     extCallbacks.customizeUiComponent(anonCloudPanel);
